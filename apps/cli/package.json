@@ -9,10 +9,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "@agent-remote/protocol": "workspace:*",
+    "@agent-remote/core": "workspace:*",
     "@agent-remote/tool-plane": "workspace:*",
     "@agent-remote/transport": "workspace:*",
     "@agent-remote/acp-server": "workspace:*",

@@ -23,6 +23,9 @@ importers:
       '@agent-remote/acp-server':
         specifier: workspace:*
         version: link:../../packages/acp-server
+      '@agent-remote/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@agent-remote/hub-server':
         specifier: workspace:*
         version: link:../hub-server

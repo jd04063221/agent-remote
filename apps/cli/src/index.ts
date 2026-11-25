@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runAcpStdioBridge } from "@agent-remote/acp-server";
+import {
+  getDefaultConfigPath,
+  loadAgentRemoteConfig,
+  STARTER_CONFIG_TOML,
+} from "@agent-remote/core";
 import {
   AgentRemoteHub,
   attachDriverSession,
@@ -18,8 +24,10 @@ import {
   McpJsonRpcHandler,
   PolicyEngine,
   WorkspaceSandbox,
+  type PermissionMode,
 } from "@agent-remote/tool-plane";
 import { TailnetDirectClient } from "@agent-remote/transport";
+import { runInteractiveChat } from "./chat.js";
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "help";
@@ -32,6 +40,48 @@ function getFlag(name: string, fallback?: string): string | undefined {
 
 async function main(): Promise<void> {
   switch (cmd) {
+    case "init": {
+      const targetPath = getFlag("--path") ?? getDefaultConfigPath();
+      const force = args.includes("--force");
+      if (fs.existsSync(targetPath) && !force) {
+        console.log(`Config already exists at ${targetPath} (pass --force to overwrite).`);
+        break;
+      }
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, STARTER_CONFIG_TOML, "utf8");
+      console.log(`Created starter config at ${targetPath}`);
+      break;
+    }
+
+    case "chat": {
+      const cfg = loadAgentRemoteConfig();
+      const profileKey = getFlag("--profile") ?? cfg.hub.default_profile;
+      const prof = profileKey ? cfg.profiles[profileKey] : undefined;
+      const host = prof ? cfg.hosts[prof.host] : undefined;
+
+      const endpoint = getFlag("--endpoint") ?? host?.endpoint;
+      if (!endpoint) {
+        console.error(
+          "Usage: ar chat --endpoint wss://<node>.ts.net/v1/ws [--agent antigravity] [--model ...] [--effort high] (or run `ar init` to configure default_profile)",
+        );
+        process.exit(1);
+      }
+
+      await runInteractiveChat({
+        endpoint,
+        bearerToken:
+          getFlag("--token") ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
+        agent: (getFlag("--agent") as AgentKind | undefined) ?? prof?.agent ?? "antigravity",
+        remoteBin: getFlag("--remote-bin") ?? prof?.remote_bin,
+        model: getFlag("--model") ?? prof?.default_model,
+        effort:
+          (getFlag("--effort") as ThinkingEffort | undefined) ?? prof?.default_effort,
+        mode: (getFlag("--mode") as PermissionMode | undefined) ?? cfg.permissions.default_mode,
+        cwd: getFlag("--cwd", process.cwd())!,
+      });
+      break;
+    }
+
     case "hub":
     case "ui": {
       const port = Number(getFlag("--port", "3775"));
@@ -281,7 +331,9 @@ echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
       console.log(`agent-remote (ar) v0.1.0
 
 Commands:
+  ar init [--path <toml>] [--force]            Create starter ~/.config/agent-remote/config.toml
   ar ui [--port 3775] [--host 127.0.0.1]       Start Local Hub + t3code-style Web Workbench
+  ar chat [--profile <id> | --endpoint <ws>]   Start interactive terminal chat with slash commands
   ar hub [--port 3775] [--db <sqlite>]         Start Local Hub Server
   ar exec --endpoint <ws> -p "<prompt>"        Headless remote execution with local tools
   ar acp --endpoint <ws> [options]             Run standard ACP stdio bridge (Zed/JetBrains)
