@@ -125,6 +125,54 @@ importers:
         specifier: workspace:*
         version: link:../../transport
 
+  packages/drivers/claude:
+    dependencies:
+      '@agent-remote/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+      '@agent-remote/transport':
+        specifier: workspace:*
+        version: link:../../transport
+
+  packages/drivers/codex:
+    dependencies:
+      '@agent-remote/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+      '@agent-remote/tool-plane':
+        specifier: workspace:*
+        version: link:../../tool-plane
+      '@agent-remote/transport':
+        specifier: workspace:*
+        version: link:../../transport
+
+  packages/drivers/factory-droid:
+    dependencies:
+      '@agent-remote/driver-antigravity':
+        specifier: workspace:*
+        version: link:../antigravity
+      '@agent-remote/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+
+  packages/drivers/gemini:
+    dependencies:
+      '@agent-remote/driver-antigravity':
+        specifier: workspace:*
+        version: link:../antigravity
+      '@agent-remote/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+
+  packages/drivers/kiro:
+    dependencies:
+      '@agent-remote/driver-antigravity':
+        specifier: workspace:*
+        version: link:../antigravity
+      '@agent-remote/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+
   packages/drivers/opencode:
     dependencies:
       '@agent-remote/driver-antigravity':
