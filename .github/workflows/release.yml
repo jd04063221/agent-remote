@@ -80,26 +80,29 @@ jobs:
   build-desktop:
     name: Build Electron Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
             eb_flag: --mac
+            csc_auto_discovery: "true"
             artifact_glob: |
               desktop-stage/desktop/release/*.dmg
               desktop-stage/desktop/release/*.zip
           - os: windows-latest
             eb_flag: --win
+            csc_auto_discovery: "false"
             artifact_glob: |
               desktop-stage/desktop/release/*.exe
           - os: ubuntu-latest
             eb_flag: --linux
+            csc_auto_discovery: "false"
             artifact_glob: |
               desktop-stage/desktop/release/*.AppImage
               desktop-stage/desktop/release/*.deb
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.csc_auto_discovery }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -153,21 +156,32 @@ jobs:
             echo "Windows ar.cmd: $OUT"
             echo "$OUT" | grep -q "agent-remote (ar)"
             HELP_OUT="$(cmd.exe //c 'desktop-stage\desktop\release\win-unpacked\resources\bin\agent-remote.cmd help' | tr -d '\r')"
-            echo "$HELP_OUT" | head -n 5
-            echo "$HELP_OUT" | grep -q "ar doctor"
+            printf '%s\n' "$HELP_OUT" | sed -n '1,5p'
+            printf '%s\n' "$HELP_OUT" | grep -q "ar doctor"
             BASH_OUT="$("desktop-stage/desktop/release/win-unpacked/resources/bin/ar" --version | tr -d '\r')"
             echo "Windows Git Bash ar: $BASH_OUT"
             echo "$BASH_OUT" | grep -q "agent-remote (ar)"
           elif [ "${{ matrix.os }}" = "macos-latest" ]; then
-            OUT="$("desktop-stage/desktop/release/mac-arm64/Agent Remote.app/Contents/Resources/bin/ar" --version)"
+            ls -la desktop-stage/desktop/release
+            AR_BIN="$(find desktop-stage/desktop/release -maxdepth 6 -path '*/mac-arm64/*.app/Contents/Resources/bin/ar' | head -n 1 || true)"
+            if [ -z "$AR_BIN" ]; then
+              AR_BIN="$(find desktop-stage/desktop/release -maxdepth 6 -path '*/*.app/Contents/Resources/bin/ar' | head -n 1 || true)"
+            fi
+            echo "Resolved macOS ar: $AR_BIN"
+            test -x "$AR_BIN"
+            OUT="$("$AR_BIN" --version)"
             echo "macOS ar: $OUT"
             echo "$OUT" | grep -q "agent-remote (ar)"
-            "desktop-stage/desktop/release/mac-arm64/Agent Remote.app/Contents/Resources/bin/agent-remote" help | head -n 5
+            HELP_OUT="$("$(dirname "$AR_BIN")/agent-remote" help)"
+            printf '%s\n' "$HELP_OUT" | sed -n '1,5p'
+            printf '%s\n' "$HELP_OUT" | grep -q "ar doctor"
           else
             OUT="$("desktop-stage/desktop/release/linux-unpacked/resources/bin/ar" --version)"
             echo "Linux ar: $OUT"
             echo "$OUT" | grep -q "agent-remote (ar)"
-            "desktop-stage/desktop/release/linux-unpacked/resources/bin/agent-remote" help | head -n 5
+            HELP_OUT="$("desktop-stage/desktop/release/linux-unpacked/resources/bin/agent-remote" help)"
+            printf '%s\n' "$HELP_OUT" | sed -n '1,5p'
+            printf '%s\n' "$HELP_OUT" | grep -q "ar doctor"
           fi
       - uses: actions/upload-artifact@v4
         with:

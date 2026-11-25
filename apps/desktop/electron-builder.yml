@@ -15,6 +15,9 @@ extraResources:
     to: bin
 mac:
   category: public.app-category.developer-tools
+  identity: "-"
+  hardenedRuntime: false
+  notarize: false
   artifactName: "agent-remote-${version}-macos-${arch}.${ext}"
   target:
     - target: dmg
