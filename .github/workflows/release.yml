@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-remote-node:
+    name: Build Go remote-node (6 platforms)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: apps/remote-node/go.sum
+      - name: Build all remote-node binaries
+        run: make go-build-all
+      - name: Generate SHA256 checksums
+        working-directory: apps/remote-node/bin
+        run: sha256sum agent-remote-node-* > checksums-remote-node.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-node-binaries
+          path: |
+            apps/remote-node/bin/agent-remote-node-*
+            apps/remote-node/bin/checksums-remote-node.txt
+
+  build-cli-bundle:
+    name: Build CLI + Web Workbench Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: pnpm
+      - name: Install & Build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - name: Stage portable CLI + Web bundle
+        run: |
+          mkdir -p release-bundle
+          pnpm --filter agent-remote deploy --prod release-bundle/agent-remote
+          mkdir -p release-bundle/agent-remote/web
+          cp -r apps/web/dist release-bundle/agent-remote/web/dist
+          tar -czf agent-remote-cli-web.tar.gz -C release-bundle agent-remote
+          sha256sum agent-remote-cli-web.tar.gz > checksums-cli-web.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-web-bundle
+          path: |
+            agent-remote-cli-web.tar.gz
+            checksums-cli-web.txt
+
+  build-desktop:
+    name: Build Electron Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: dist:mac
+            artifact_glob: "apps/desktop/release/*.dmg\napps/desktop/release/*.zip"
+          - os: windows-latest
+            script: dist:win
+            artifact_glob: "apps/desktop/release/*.exe"
+          - os: ubuntu-latest
+            script: dist:linux
+            artifact_glob: "apps/desktop/release/*.AppImage\napps/desktop/release/*.deb"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: pnpm
+      - name: Install dependencies & build monorepo
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - name: Install Electron & electron-builder for packaging
+        working-directory: apps/desktop
+        run: pnpm add -D electron@35 electron-builder@25
+      - name: Package desktop installer
+        working-directory: apps/desktop
+        run: pnpm run ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-remote-node, build-cli-bundle, build-desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+          merge-multiple: true
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "agent-remote ${{ steps.tag.outputs.name }}"
+          generate_release_notes: true
+          files: dist-all/*
