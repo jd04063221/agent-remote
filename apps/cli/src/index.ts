@@ -287,9 +287,13 @@ async function main(): Promise<void> {
       await client.connect();
 
       const sessionId = `exec_${crypto.randomBytes(4).toString("hex")}`;
+      const execMode = (getFlag("--mode") as PermissionMode | undefined) ?? "workspace-full";
       const engine = new LocalToolEngine({
-        sandbox: new WorkspaceSandbox({ workspaceRoot: cwd }),
-        policy: new PolicyEngine({ mode: "auto" }),
+        sandbox: new WorkspaceSandbox({
+          workspaceRoot: cwd,
+          allowOutsideWorkspace: execMode === "full-access",
+        }),
+        policy: new PolicyEngine({ mode: execMode }),
       });
       const mcp = new McpJsonRpcHandler(engine);
 

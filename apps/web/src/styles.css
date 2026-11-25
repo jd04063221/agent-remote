@@ -618,6 +618,15 @@ html, body, #root {
 }
 .composer-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .model-input { min-width: 190px; }
+.mode-select.mode-workspace-full {
+  border-color: rgba(56, 193, 114, 0.55);
+  color: #a9f0c7;
+}
+.mode-select.mode-full-access {
+  border-color: rgba(245, 166, 35, 0.75);
+  background: rgba(245, 166, 35, 0.12);
+  color: #ffd080;
+}
 
 .tabs { display: flex; border-bottom: 1px solid var(--border); }
 .tabs button {

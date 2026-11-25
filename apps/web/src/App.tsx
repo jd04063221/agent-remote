@@ -1574,11 +1574,24 @@ export function App() {
                   )}
                 </select>
 
-                <select value={selectedMode} onChange={(e) => setSelectedMode(e.target.value)}>
+                <select
+                  className={
+                    selectedMode === "full-access"
+                      ? "mode-select mode-full-access"
+                      : selectedMode === "workspace-full"
+                        ? "mode-select mode-workspace-full"
+                        : "mode-select"
+                  }
+                  value={selectedMode}
+                  onChange={(e) => setSelectedMode(e.target.value)}
+                  title={t("composer.modeTooltip")}
+                >
+                  <option value="plan">{t("composer.modePlan")}</option>
                   <option value="default">{t("composer.modeAsk")}</option>
                   <option value="accept-edits">{t("composer.modeAcceptEdits")}</option>
                   <option value="auto">{t("composer.modeAuto")}</option>
-                  <option value="plan">{t("composer.modePlan")}</option>
+                  <option value="workspace-full">{t("composer.modeWorkspaceFull")}</option>
+                  <option value="full-access">{t("composer.modeFullAccess")}</option>
                 </select>
 
                 <label className="check">

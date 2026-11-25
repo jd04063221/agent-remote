@@ -775,7 +775,9 @@ export class AgentRemoteHub {
       if (turn.cancelled) throw new TurnCancelledError();
 
       rt.abortController = turn.abortController;
-      rt.policy.setMode((thread.mode as PermissionMode) || "default");
+      const effectiveMode = (thread.mode as PermissionMode) || "default";
+      rt.policy.setMode(effectiveMode);
+      rt.engine.sandbox.setAllowOutsideWorkspace(effectiveMode === "full-access");
       rt.turnReceivedExactUsage = false;
       rt.turnEstimatedOutputTokens = 0;
 
@@ -894,9 +896,14 @@ export class AgentRemoteHub {
       throw new Error(`Invalid host (${thread.hostId}) or profile (${thread.profileId})`);
     }
 
-    const sandbox = new WorkspaceSandbox({ workspaceRoot: thread.worktreePath });
+    const initialMode =
+      (thread.mode as PermissionMode) || this.config.permissions.default_mode || "default";
+    const sandbox = new WorkspaceSandbox({
+      workspaceRoot: thread.worktreePath,
+      allowOutsideWorkspace: initialMode === "full-access",
+    });
     const policy = new PolicyEngine({
-      mode: (thread.mode as PermissionMode) || this.config.permissions.default_mode || "default",
+      mode: initialMode,
       rules: this.buildConfiguredPolicyRules(),
     });
 
@@ -1237,13 +1244,27 @@ export class AgentRemoteHub {
     };
     emitStage("spawning");
 
+    const parentMode = (parentThread.mode as PermissionMode) || "default";
+    const childPolicyMode: PermissionMode =
+      call.readOnly || parentMode === "plan"
+        ? "plan"
+        : parentMode === "full-access"
+          ? "full-access"
+          : parentMode === "workspace-full"
+            ? "workspace-full"
+            : "accept-edits";
+
     const childSandbox = new WorkspaceSandbox({
       workspaceRoot: parentThread.worktreePath,
-      readOnly: call.readOnly,
+      readOnly: call.readOnly || parentMode === "plan",
+      allowOutsideWorkspace: parentMode === "full-access",
     });
     const childEngine = new LocalToolEngine({
       sandbox: childSandbox,
-      policy: new PolicyEngine({ mode: call.readOnly ? "plan" : "accept-edits" }),
+      policy: new PolicyEngine({
+        mode: childPolicyMode,
+        rules: this.buildConfiguredPolicyRules(),
+      }),
       onToolEvent: (ev) => {
         this.broadcast({
           type: "subagent_tool",
@@ -1378,13 +1399,29 @@ export class AgentRemoteHub {
         childPromptParts.push(`[Subagent Role: ${call.subagentName}]\n${call.systemPrompt.trim()}`);
       }
       if (!call.pureInferenceOnly) {
+        const accessLabel =
+          childPolicyMode === "plan"
+            ? parentMode === "full-access"
+              ? "read-only (unrestricted local paths)"
+              : "read-only (workspace)"
+            : childPolicyMode === "full-access"
+              ? "full unrestricted local access (read/write/delete/run_command)"
+              : childPolicyMode === "workspace-full"
+                ? "workspace full access (read/write/delete/run_command)"
+                : "read-write (scoped workspace edits)";
+        const extraToolsHint =
+          childPolicyMode === "plan"
+            ? ""
+            : childPolicyMode === "workspace-full" || childPolicyMode === "full-access"
+              ? ", `edit_file`, `write_file`, `delete_file`, `run_command`"
+              : ", `edit_file`, `write_file`";
         childPromptParts.push(
           [
             `[Workspace Context]`,
             `Local workspace root: ${parentThread.worktreePath}`,
             `Git branch: ${parentThread.branch}`,
-            `Access mode: ${call.readOnly ? "read-only" : "read-write (scoped edits)"}`,
-            `Use the \`agent_remote_local\` MCP tools (\`read_file\`, \`list_dir\`, \`glob\`, \`grep\`${call.readOnly ? "" : ", `edit_file`, `write_file`"}) with paths relative to the workspace root (e.g. "." or "src/index.ts").`,
+            `Access mode: ${accessLabel}`,
+            `Use the \`agent_remote_local\` MCP tools (\`read_file\`, \`list_dir\`, \`glob\`, \`grep\`${extraToolsHint}) with paths relative to the workspace root (e.g. "." or "src/index.ts").`,
           ].join("\n"),
         );
       }

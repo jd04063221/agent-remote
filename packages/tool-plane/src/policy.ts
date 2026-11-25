@@ -1,6 +1,14 @@
 export type PolicyAction = "read" | "search" | "write" | "delete" | "command" | "mcp";
 export type PolicyDecision = "allow" | "ask" | "deny";
-export type PermissionMode = "default" | "accept-edits" | "auto" | "plan";
+export const PERMISSION_MODES = [
+  "plan",
+  "default",
+  "accept-edits",
+  "auto",
+  "workspace-full",
+  "full-access",
+] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 export interface PolicyRule {
   action: PolicyAction | "*";
@@ -33,14 +41,19 @@ export type ApprovalOutcome =
 
 export type ApprovalCallback = (req: ApprovalRequest) => Promise<ApprovalOutcome>;
 
-const HARD_DENY_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
+// Always blocked in every mode to prevent catastrophic irreversible system destruction.
+const CATASTROPHIC_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /(^|[;&|]\s*)rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/(\s|$|\*)/, reason: "destructive root deletion" },
-  { re: /(^|[;&|]\s*)sudo\s+/, reason: "privileged sudo execution blocked by policy" },
   { re: /(^|[;&|]\s*)mkfs(\.[a-z0-9]+)?\s+/, reason: "filesystem formatting blocked" },
   { re: /:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;\s*:/, reason: "fork bomb blocked" },
-  { re: /(curl|wget)\s+[^|]+\|\s*(ba)?sh(\s|$)/, reason: "piping remote script to shell blocked" },
   { re: /(^|[;&|]\s*)(remove-item|ri|rd|rmdir)\b.*\s+([a-zA-Z]:\\(\s|$|\*)|\/(\s|$))/i, reason: "destructive Windows root deletion blocked" },
   { re: /(^|[;&|]\s*)format(\.com)?\s+[a-zA-Z]:/i, reason: "disk formatting blocked" },
+];
+
+// Blocked in workspace-scoped modes; permitted when the user explicitly selects `full-access`.
+const PRIVILEGED_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
+  { re: /(^|[;&|]\s*)sudo\s+/, reason: "privileged sudo execution blocked by policy" },
+  { re: /(curl|wget)\s+[^|]+\|\s*(ba)?sh(\s|$)/, reason: "piping remote script to shell blocked" },
   { re: /(irm|iwr|invoke-restmethod|invoke-webrequest)\s+[^|]+\|\s*(iex|invoke-expression)(\s|$)/i, reason: "piping remote script to PowerShell Invoke-Expression blocked" },
 ];
 
@@ -82,11 +95,18 @@ export class PolicyEngine {
   evaluate(action: PolicyAction, target: string): PolicyEvaluation {
     const signature = `${action}:${target}`;
 
-    // 1. Hard-coded non-overridable destructive command guard
+    // 1. Hard-coded destructive command guard
     if (action === "command") {
-      for (const guard of HARD_DENY_COMMAND_PATTERNS) {
+      for (const guard of CATASTROPHIC_COMMAND_PATTERNS) {
         if (guard.re.test(target)) {
           return { decision: "deny", reason: guard.reason, signature };
+        }
+      }
+      if (this.mode !== "full-access") {
+        for (const guard of PRIVILEGED_COMMAND_PATTERNS) {
+          if (guard.re.test(target)) {
+            return { decision: "deny", reason: guard.reason, signature };
+          }
         }
       }
     }
@@ -127,7 +147,7 @@ export class PolicyEngine {
 
     // 5. Default mode matrix
     if (action === "read" || action === "search") {
-      return { decision: "allow", reason: "Read-only workspace inspection", signature };
+      return { decision: "allow", reason: "Read-only inspection", signature };
     }
     if (
       action === "mcp" &&
@@ -136,6 +156,13 @@ export class PolicyEngine {
       return {
         decision: "allow",
         reason: "Subagent delegation (child tools enforce their own sandbox & policy)",
+        signature,
+      };
+    }
+    if (this.mode === "workspace-full" || this.mode === "full-access") {
+      return {
+        decision: "allow",
+        reason: `Auto-allowed in ${this.mode} mode`,
         signature,
       };
     }

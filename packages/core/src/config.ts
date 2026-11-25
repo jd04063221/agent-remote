@@ -85,7 +85,9 @@ export const AgentRemoteConfigSchema = z.object({
   task_presets: z.record(z.string(), TaskPresetSchema).default({}),
   permissions: z
     .object({
-      default_mode: z.enum(["default", "accept-edits", "auto", "plan"]).default("default"),
+      default_mode: z
+        .enum(["plan", "default", "accept-edits", "auto", "workspace-full", "full-access"])
+        .default("default"),
       allow: z.array(z.string()).default([]),
       ask: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),

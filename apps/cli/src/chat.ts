@@ -18,6 +18,7 @@ import {
 import {
   LocalToolEngine,
   McpJsonRpcHandler,
+  PERMISSION_MODES,
   PolicyEngine,
   WorkspaceSandbox,
   WorktreeManager,
@@ -233,8 +234,12 @@ export async function runInteractiveChat(options: InteractiveChatOptions): Promi
   const ack = await client.connect();
   const rtt = await client.ping();
 
-  const policy = new PolicyEngine({ mode: options.mode ?? (thread?.mode as PermissionMode) ?? "default" });
-  const sandbox = new WorkspaceSandbox({ workspaceRoot: effectiveCwd });
+  const initialMode = options.mode ?? (thread?.mode as PermissionMode) ?? "default";
+  const policy = new PolicyEngine({ mode: initialMode });
+  const sandbox = new WorkspaceSandbox({
+    workspaceRoot: effectiveCwd,
+    allowOutsideWorkspace: initialMode === "full-access",
+  });
 
   const engine = new LocalToolEngine({
     sandbox,
@@ -413,7 +418,7 @@ export async function runInteractiveChat(options: InteractiveChatOptions): Promi
               "/models           List live remote models and supported efforts",
               "/model <id>       Switch model for next turns",
               "/effort <level>   Switch thinking effort (low|medium|high|xhigh|max)",
-              "/mode <mode>      Switch local permission mode (default|accept-edits|auto|plan)",
+              `/mode <mode>      Switch local permission mode (${PERMISSION_MODES.join("|")})`,
               "/quota            Query remote remaining quota / balance (incl. live Codex RPC)",
               "/usage            Show exact/estimated token usage for this thread",
               "/history          Show locally saved transcript for this thread",
@@ -449,15 +454,17 @@ export async function runInteractiveChat(options: InteractiveChatOptions): Promi
           continue;
         }
         if (slash.kind === "mode") {
-          if (slash.arg && ["default", "accept-edits", "auto", "plan"].includes(slash.arg)) {
-            policy.setMode(slash.arg as PermissionMode);
+          if (slash.arg && (PERMISSION_MODES as readonly string[]).includes(slash.arg)) {
+            const nextMode = slash.arg as PermissionMode;
+            policy.setMode(nextMode);
+            sandbox.setAllowOutsideWorkspace(nextMode === "full-access");
             if (thread && store) {
-              thread.mode = slash.arg;
+              thread.mode = nextMode;
               store.upsertThread(thread);
             }
-            console.log(`${ANSI.green}Permission mode set to ${slash.arg}${ANSI.reset}`);
+            console.log(`${ANSI.green}Permission mode set to ${nextMode}${ANSI.reset}`);
           } else {
-            console.log(`Current mode: ${policy.getMode()} (valid: default|accept-edits|auto|plan)`);
+            console.log(`Current mode: ${policy.getMode()} (valid: ${PERMISSION_MODES.join("|")})`);
           }
           continue;
         }

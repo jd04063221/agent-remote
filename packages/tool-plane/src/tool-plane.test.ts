@@ -47,6 +47,50 @@ describe("@agent-remote/tool-plane", () => {
     expect(policy.evaluate("command", "git status").decision).toBe("allow");
   });
 
+  it("supports workspace-full (sandboxed autonomous) and full-access (unrestricted) permission modes", () => {
+    const wsPolicy = new PolicyEngine({ mode: "workspace-full" });
+    expect(wsPolicy.evaluate("write", "src/index.ts").decision).toBe("allow");
+    expect(wsPolicy.evaluate("delete", "src/old.ts").decision).toBe("allow");
+    expect(wsPolicy.evaluate("command", "pnpm test && go test ./...").decision).toBe("allow");
+    expect(wsPolicy.evaluate("mcp", "postgres_query").decision).toBe("allow");
+    expect(wsPolicy.evaluate("command", "sudo apt update").decision).toBe("deny");
+    expect(wsPolicy.evaluate("command", "rm -rf /").decision).toBe("deny");
+
+    const fullPolicy = new PolicyEngine({ mode: "full-access" });
+    expect(fullPolicy.evaluate("write", "/tmp/any-file.txt").decision).toBe("allow");
+    expect(fullPolicy.evaluate("delete", "/tmp/any-file.txt").decision).toBe("allow");
+    expect(fullPolicy.evaluate("command", "sudo systemctl restart demo").decision).toBe("allow");
+    expect(fullPolicy.evaluate("mcp", "postgres_query").decision).toBe("allow");
+    // Catastrophic accidental root wipe remains guarded even in full-access
+    expect(fullPolicy.evaluate("command", "rm -rf /").decision).toBe("deny");
+    expect(fullPolicy.evaluate("command", "mkfs.ext4 /dev/sda").decision).toBe("deny");
+
+    // WorkspaceSandbox enforces containment by default and toggles cleanly for full-access
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "ar-outside-test-"));
+    const outsideFile = path.join(outsideDir, "note.txt");
+    fs.writeFileSync(outsideFile, "outside");
+    try {
+      const sandbox = new WorkspaceSandbox({ workspaceRoot: tmpRoot });
+      expect(() => sandbox.resolvePath(outsideFile, "read")).toThrow(SandboxViolationError);
+      sandbox.setAllowOutsideWorkspace(true);
+      expect(sandbox.resolvePath(outsideFile, "read")).toBe(fs.realpathSync(outsideFile));
+      expect(sandbox.resolvePath(outsideFile, "write")).toBe(fs.realpathSync(outsideFile));
+      sandbox.setAllowOutsideWorkspace(false);
+      expect(() => sandbox.resolvePath(outsideFile, "read")).toThrow(SandboxViolationError);
+
+      // Read-only subagent sandbox still blocks writes even when unrestricted for reads
+      const roUnrestricted = new WorkspaceSandbox({
+        workspaceRoot: tmpRoot,
+        readOnly: true,
+        allowOutsideWorkspace: true,
+      });
+      expect(roUnrestricted.resolvePath(outsideFile, "read")).toBe(fs.realpathSync(outsideFile));
+      expect(() => roUnrestricted.resolvePath(outsideFile, "write")).toThrow(SandboxViolationError);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it("executes read/edit/grep/command and MCP JSON-RPC calls with approval gating", async () => {
     const sandbox = new WorkspaceSandbox({ workspaceRoot: tmpRoot });
     const policy = new PolicyEngine({ mode: "default" });
