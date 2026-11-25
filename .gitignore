@@ -31,6 +31,12 @@ coverage.out
 *.key
 *_deploy
 *_deploy.pub
+*_deploy_ed25519
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+*.ppk
 
 # Logs & temp
 *.log
