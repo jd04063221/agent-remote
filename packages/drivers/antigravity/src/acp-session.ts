@@ -39,6 +39,9 @@ export class AcpRemoteSession extends EventEmitter {
   private nextId = 1;
   private stdoutBuf = "";
   private remoteSessionId?: string;
+  private supportsLoadSession = false;
+  private loadingHistory = false;
+  private turnEmittedUsage = false;
   private readonly pending = new Map<
     number,
     { resolve: (res: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
@@ -68,7 +71,7 @@ export class AcpRemoteSession extends EventEmitter {
   }
 
   async initialize(): Promise<Record<string, unknown>> {
-    return (await this.request("initialize", {
+    const res = (await this.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
@@ -76,13 +79,13 @@ export class AcpRemoteSession extends EventEmitter {
       },
       clientInfo: { name: "agent-remote", version: "0.1.0" },
     })) as Record<string, unknown>;
+    const caps = res.agentCapabilities as { loadSession?: boolean } | undefined;
+    this.supportsLoadSession = caps?.loadSession === true;
+    return res;
   }
 
-  async startSession(options?: {
-    systemPromptAppend?: string;
-    extraMcpServers?: Array<Record<string, unknown>>;
-  }): Promise<AgySessionNewResult> {
-    const mcpServers: Array<Record<string, unknown>> = [...(options?.extraMcpServers ?? [])];
+  private buildMcpServers(extra?: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    const mcpServers: Array<Record<string, unknown>> = [...(extra ?? [])];
     if (this.channel.mcpEndpointUrl && this.channel.mcpBearerToken) {
       mcpServers.push({
         type: "http",
@@ -96,6 +99,14 @@ export class AcpRemoteSession extends EventEmitter {
         ],
       });
     }
+    return mcpServers;
+  }
+
+  async startSession(options?: {
+    systemPromptAppend?: string;
+    extraMcpServers?: Array<Record<string, unknown>>;
+  }): Promise<AgySessionNewResult> {
+    const mcpServers = this.buildMcpServers(options?.extraMcpServers);
 
     const params: Record<string, unknown> = {
       cwd: this.channel.workdir,
@@ -112,6 +123,48 @@ export class AcpRemoteSession extends EventEmitter {
     const res = (await this.request("session/new", params, 30_000)) as AgySessionNewResult;
     this.remoteSessionId = res.sessionId;
     return res;
+  }
+
+  /**
+   * Attempts native ACP `session/load` when the remote agent advertises `loadSession: true`
+   * and a prior `resumeSessionId` is provided; gracefully falls back to `session/new`.
+   * Replayed history chunks during `session/load` are suppressed to avoid duplicating local SQLite records.
+   */
+  async resumeOrStartSession(options?: {
+    resumeSessionId?: string;
+    systemPromptAppend?: string;
+    extraMcpServers?: Array<Record<string, unknown>>;
+  }): Promise<{ result: AgySessionNewResult; resumed: boolean }> {
+    if (options?.resumeSessionId && this.supportsLoadSession) {
+      this.loadingHistory = true;
+      try {
+        const mcpServers = this.buildMcpServers(options.extraMcpServers);
+        const res = (await this.request(
+          "session/load",
+          {
+            sessionId: options.resumeSessionId,
+            cwd: this.channel.workdir,
+            mcpServers,
+          },
+          30_000,
+        )) as Partial<AgySessionNewResult> | null;
+        this.remoteSessionId = res?.sessionId ?? options.resumeSessionId;
+        return {
+          result: {
+            ...(res ?? {}),
+            sessionId: this.remoteSessionId,
+          } as AgySessionNewResult,
+          resumed: true,
+        };
+      } catch {
+        // Fall back cleanly to creating a fresh remote session
+      } finally {
+        this.loadingHistory = false;
+      }
+    }
+
+    const result = await this.startSession(options);
+    return { result, resumed: false };
   }
 
   async setConfigOption(configId: string, value: string): Promise<unknown> {
@@ -134,7 +187,8 @@ export class AcpRemoteSession extends EventEmitter {
 
   async prompt(text: string): Promise<unknown> {
     if (!this.remoteSessionId) throw new Error("ACP session not initialized");
-    return await this.request(
+    this.turnEmittedUsage = false;
+    const res = await this.request(
       "session/prompt",
       {
         sessionId: this.remoteSessionId,
@@ -142,6 +196,19 @@ export class AcpRemoteSession extends EventEmitter {
       },
       600_000,
     );
+    if (!this.turnEmittedUsage) {
+      const usage = extractAcpUsage(res);
+      if (usage) {
+        this.turnEmittedUsage = true;
+        this.emit("event", {
+          type: "usage_delta",
+          sessionId: this.localSessionId,
+          ...usage,
+          exact: true,
+        });
+      }
+    }
+    return res;
   }
 
   cancel(): void {
@@ -241,6 +308,10 @@ export class AcpRemoteSession extends EventEmitter {
     const update = (params.update ?? params) as Record<string, unknown>;
     const kind = String(update.sessionUpdate ?? update.type ?? "");
 
+    if (this.loadingHistory && (kind === "agent_message_chunk" || kind === "agent_thought_chunk")) {
+      return;
+    }
+
     if (kind === "agent_message_chunk") {
       const content = update.content as { text?: string } | undefined;
       if (content?.text) {
@@ -257,6 +328,17 @@ export class AcpRemoteSession extends EventEmitter {
           type: "thought_delta",
           sessionId: this.localSessionId,
           text: content.text,
+        });
+      }
+    } else if (kind === "usage_update") {
+      const usage = extractAcpUsage(update);
+      if (usage) {
+        this.turnEmittedUsage = true;
+        this.emit("event", {
+          type: "usage_delta",
+          sessionId: this.localSessionId,
+          ...usage,
+          exact: true,
         });
       }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
@@ -350,4 +432,61 @@ export class AcpRemoteSession extends EventEmitter {
       });
     }
   }
+}
+
+export function extractAcpUsage(raw: unknown): {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+} | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const meta = obj._meta as Record<string, unknown> | undefined;
+  const candidate = (obj.usage ?? obj.tokenUsage ?? meta?.usage ?? obj) as Record<string, unknown>;
+  if (!candidate || typeof candidate !== "object") return null;
+
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+  const inputTokens = Math.round(
+    num(candidate.inputTokens ?? candidate.input_tokens ?? candidate.promptTokens ?? candidate.prompt_tokens),
+  );
+  const outputTokens = Math.round(
+    num(candidate.outputTokens ?? candidate.output_tokens ?? candidate.completionTokens ?? candidate.completion_tokens),
+  );
+  const cachedInputTokens = Math.round(
+    num(
+      candidate.cachedReadTokens ??
+        candidate.cachedInputTokens ??
+        candidate.cached_input_tokens ??
+        candidate.cache_read_input_tokens,
+    ),
+  );
+  const reasoningTokens = Math.round(
+    num(
+      candidate.thoughtTokens ??
+        candidate.reasoningTokens ??
+        candidate.reasoning_tokens ??
+        candidate.reasoning_output_tokens,
+    ),
+  );
+  const costRaw = candidate.costUsd ?? candidate.totalCostUsd ?? candidate.total_cost_usd ?? obj.costUsd ?? obj.total_cost_usd;
+  const costObj = candidate.cost as { amount?: number } | undefined;
+  const costUsd =
+    typeof costRaw === "number" && Number.isFinite(costRaw)
+      ? costRaw
+      : typeof costObj?.amount === "number" && Number.isFinite(costObj.amount)
+        ? costObj.amount
+        : undefined;
+
+  if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0 && reasoningTokens === 0) {
+    return null;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }

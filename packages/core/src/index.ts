@@ -42,6 +42,16 @@ export type CanonicalEvent =
       effort?: ThinkingEffort;
     }
   | {
+      type: "usage_delta";
+      sessionId: string;
+      inputTokens: number;
+      outputTokens: number;
+      cachedInputTokens?: number;
+      reasoningTokens?: number;
+      costUsd?: number;
+      exact: boolean;
+    }
+  | {
       type: "turn_completed";
       sessionId: string;
       stopReason: "end_turn" | "cancelled" | "error";
@@ -134,6 +144,57 @@ export function buildQuotaSaverGuidance(
     }),
   ];
   return lines.join("\n");
+}
+
+/**
+ * Formats locally persisted thread events into a concise conversation transcript
+ * used to seamlessly restore context whenever native remote session resume is unavailable
+ * or remote incognito (ephemeral) mode is enabled.
+ */
+export function formatLocalHistoryContext(
+  events: Array<{ kind: string; payload: Record<string, unknown> }>,
+  maxChars = 12_000,
+): string {
+  const turns: Array<{ role: "user" | "assistant"; text: string }> = [];
+
+  for (const ev of events) {
+    if (ev.kind === "user_message" && typeof ev.payload.text === "string" && ev.payload.text.trim()) {
+      turns.push({ role: "user", text: ev.payload.text.trim() });
+    } else if (ev.kind === "text_delta" && typeof ev.payload.text === "string") {
+      const last = turns[turns.length - 1];
+      if (last && last.role === "assistant") {
+        last.text += ev.payload.text;
+      } else {
+        turns.push({ role: "assistant", text: ev.payload.text });
+      }
+    }
+  }
+
+  if (turns.length === 0) return "";
+
+  const rendered: string[] = [];
+  let used = 0;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i]!;
+    const clean = t.text.trim();
+    if (!clean) continue;
+    const prefix = t.role === "user" ? "User: " : "Assistant: ";
+    const entry = `${prefix}${clean}`;
+    if (used + entry.length > maxChars && rendered.length > 0) break;
+    rendered.unshift(entry.slice(0, maxChars));
+    used += entry.length;
+  }
+
+  if (rendered.length === 0) return "";
+  return [
+    "[agent-remote: Restored Local Conversation History]",
+    "The remote agent session was restarted or is running in incognito mode.",
+    "Continue seamlessly using this locally persisted transcript from previous turns:",
+    "",
+    ...rendered,
+    "",
+    "[End of Restored History]",
+  ].join("\n");
 }
 
 export interface AgentProbeReport {

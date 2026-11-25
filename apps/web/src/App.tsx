@@ -91,6 +91,7 @@ export function App() {
     profileId: "",
     createWorktree: false,
     branchName: "",
+    ephemeralRemote: false,
   });
 
   const notify = (msg: string) => {
@@ -348,6 +349,7 @@ export function App() {
                   <span>{prof?.agent ?? t.profileId}@{t.hostId}</span>
                   <span className="badge">{t.branch}</span>
                   {t.quotaSaverMode && <span className="badge green">QS</span>}
+                  {t.ephemeralRemote && <span className="badge">Incognito</span>}
                 </div>
               </div>
             );
@@ -507,6 +509,17 @@ export function App() {
                         </option>
                       ))}
                   </select>
+                )}
+                {activeThread.ephemeralRemote ? (
+                  <span className="badge" title="Remote CLI session persistence disabled; local SQLite restores context">
+                    Remote Incognito
+                  </span>
+                ) : (
+                  activeThread.remoteSessionId && (
+                    <span className="badge" title={`Resumable remote session: ${activeThread.remoteSessionId}`}>
+                      Resumable
+                    </span>
+                  )
                 )}
                 {activeCatalog?.tierName && <span className="badge">{activeCatalog.tierName}</span>}
                 <span className="badge green">Offloaded: {offloadPct}%</span>
@@ -901,7 +914,12 @@ export function App() {
                   </div>
                   {q.windows.map((w) => (
                     <div key={w.label} className="profile-row">
-                      <span>{w.label}</span>
+                      <div>
+                        <span>{w.label}</span>
+                        {w.resetsAt && (
+                          <div className="muted-sm">Resets {w.resetsAt.replace("T", " ").slice(0, 19)}</div>
+                        )}
+                      </div>
                       <strong>
                         {w.remainingAmount ??
                           (w.remainingPercent !== undefined ? `${w.remainingPercent.toFixed(0)}% left` : "—")}
@@ -914,12 +932,34 @@ export function App() {
             })()}
 
             <div className="section-head" style={{ marginTop: 8 }}>
-              <span>QUOTA-SAVER OFFLOAD METRICS</span>
+              <span>TOKEN USAGE &amp; QUOTA-SAVER</span>
+              <span className="badge">{usage?.exact ? "Exact API" : "Estimated"}</span>
             </div>
             <div className="quota-stat">
-              <div>Primary Brain Tokens</div>
-              <strong>{mainTotal.toLocaleString()}</strong>
+              <div>Primary Brain Tokens (In / Out)</div>
+              <strong>
+                {mainTotal.toLocaleString()} ({(usage?.mainInputTokens ?? 0).toLocaleString()} /{" "}
+                {(usage?.mainOutputTokens ?? 0).toLocaleString()})
+              </strong>
             </div>
+            {(usage?.mainCachedInputTokens ?? 0) > 0 && (
+              <div className="quota-stat">
+                <div>Cached Input Tokens</div>
+                <strong>{(usage?.mainCachedInputTokens ?? 0).toLocaleString()}</strong>
+              </div>
+            )}
+            {(usage?.mainReasoningTokens ?? 0) > 0 && (
+              <div className="quota-stat">
+                <div>Reasoning Tokens</div>
+                <strong>{(usage?.mainReasoningTokens ?? 0).toLocaleString()}</strong>
+              </div>
+            )}
+            {usage?.totalCostUsd !== undefined && (
+              <div className="quota-stat">
+                <div>Reported Session Cost</div>
+                <strong>${usage.totalCostUsd.toFixed(4)} USD</strong>
+              </div>
+            )}
             <div className="quota-stat green">
               <div>Offloaded to Low-Cost Subagents</div>
               <strong>{offloadedTotal.toLocaleString()} ({offloadPct}%)</strong>
@@ -1045,6 +1085,14 @@ export function App() {
             {threadDraft.createWorktree && (
               <label>Branch Name (optional)<input value={threadDraft.branchName} onChange={(e) => setThreadDraft({ ...threadDraft, branchName: e.target.value })} /></label>
             )}
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={threadDraft.ephemeralRemote}
+                onChange={(e) => setThreadDraft({ ...threadDraft, ephemeralRemote: e.target.checked })}
+              />
+              <span>Remote incognito (disable remote CLI session persistence; keep history local only)</span>
+            </label>
             <div className="modal-actions">
               <button className="btn" onClick={() => setModal(null)}>Cancel</button>
               <button
@@ -1061,6 +1109,7 @@ export function App() {
                       profileId: prof.id,
                       createWorktree: threadDraft.createWorktree,
                       branchName: threadDraft.branchName || undefined,
+                      ephemeralRemote: threadDraft.ephemeralRemote,
                       quotaSaverMode: true,
                     }),
                   });

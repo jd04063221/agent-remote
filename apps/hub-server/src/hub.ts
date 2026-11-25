@@ -6,6 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import {
   buildQuotaSaverGuidance,
+  formatLocalHistoryContext,
   loadAgentRemoteConfig,
   parsePermissionRuleExpr,
   type AgentRemoteConfig,
@@ -53,6 +54,7 @@ import {
 import {
   attachDriverSession,
   buildSpawnSpecForAgent,
+  probeCodexRateLimitsOverChannel,
   type UnifiedDriverSession,
 } from "./driver-factory.js";
 import {
@@ -73,6 +75,9 @@ interface ActiveRuntime {
   abortController: AbortController;
   localMcpClients: StdioMcpClient[];
   localHttpMcp?: LocalHttpMcpServer;
+  pendingHistoryPrefix?: string;
+  turnReceivedExactUsage: boolean;
+  turnEstimatedOutputTokens: number;
 }
 
 export interface HubServerOptions {
@@ -337,6 +342,65 @@ export class AgentRemoteHub {
     const host = this.store.getHost(profile.hostId);
     if (!host) throw new Error(`Unknown host: ${profile.hostId}`);
 
+    // Live Codex quota via active app-server session or lightweight ephemeral RPC probe
+    if (profile.agent === "codex") {
+      for (const rt of this.runtimes.values()) {
+        if (rt.profileId === profile.id && rt.driver.readQuota) {
+          try {
+            const snap = await rt.driver.readQuota();
+            if (snap) {
+              this.store.upsertQuota(snap);
+              this.broadcast({ type: "quota_updated", payload: snap });
+              return snap;
+            }
+          } catch {
+            // Fall through to ephemeral probe
+          }
+        }
+      }
+
+      const probeSessionId = `codex-quota-${crypto.randomBytes(3).toString("hex")}`;
+      try {
+        const spawned = await this.spawnOnHost(host, {
+          sessionId: probeSessionId,
+          agent: "codex",
+          command: profile.remoteBin ?? "codex",
+          args: ["app-server", "-c", 'sandbox_mode="read-only"', "-c", "ephemeral=true"],
+          env: {},
+          ephemeralFiles: {},
+          enableMcpBridge: false,
+        });
+        try {
+          const snap = await probeCodexRateLimitsOverChannel({
+            hostId: host.id,
+            profileId: profile.id,
+            sessionId: probeSessionId,
+            channel: spawned.channel,
+          });
+          this.store.upsertQuota(snap);
+          this.broadcast({ type: "quota_updated", payload: snap });
+          return snap;
+        } finally {
+          spawned.channel.kill();
+          await spawned.localHttpMcp?.close();
+        }
+      } catch (err) {
+        const snap: QuotaSnapshot = {
+          hostId: host.id,
+          profileId: profile.id,
+          agent: "codex",
+          available: false,
+          source: "unavailable",
+          windows: [],
+          note: `Codex account/rateLimits/read probe failed: ${(err as Error).message}`,
+          fetchedAt: new Date().toISOString(),
+        };
+        this.store.upsertQuota(snap);
+        this.broadcast({ type: "quota_updated", payload: snap });
+        return snap;
+      }
+    }
+
     if (host.transport !== "tailnet-direct") {
       const snap: QuotaSnapshot = {
         hostId: host.id,
@@ -387,6 +451,7 @@ export class AgentRemoteHub {
     effort?: ThinkingEffort;
     mode?: string;
     quotaSaverMode?: boolean;
+    ephemeralRemote?: boolean;
     subagentOverrides?: Record<string, SubagentTaskOverride>;
   }): Promise<ThreadRecord> {
     const absWorkspace = path.resolve(input.workspaceRoot);
@@ -415,12 +480,17 @@ export class AgentRemoteHub {
       effort: input.effort,
       mode: input.mode ?? "default",
       quotaSaverMode: Boolean(input.quotaSaverMode),
+      remoteSessionId: undefined,
+      ephemeralRemote: input.ephemeralRemote ?? this.config.hub.ephemeral_remote ?? false,
       subagentOverrides: input.subagentOverrides ?? {},
       usage: {
         mainInputTokens: 0,
         mainOutputTokens: 0,
+        mainCachedInputTokens: 0,
+        mainReasoningTokens: 0,
         offloadedInputTokens: 0,
         offloadedOutputTokens: 0,
+        exact: false,
       },
       status: "idle",
       createdAt: now,
@@ -492,13 +562,32 @@ export class AgentRemoteHub {
     try {
       const rt = await this.ensureRuntime(thread);
       rt.policy.setMode((thread.mode as PermissionMode) || "default");
-      await rt.driver.prompt(prompt, {
+      rt.turnReceivedExactUsage = false;
+      rt.turnEstimatedOutputTokens = 0;
+
+      let effectivePrompt = prompt;
+      if (rt.pendingHistoryPrefix) {
+        effectivePrompt = `${rt.pendingHistoryPrefix}\n\n${prompt}`;
+        rt.pendingHistoryPrefix = undefined;
+      }
+
+      await rt.driver.prompt(effectivePrompt, {
         model: thread.model,
         effort: thread.effort,
       });
 
-      // Lightweight token estimate update for primary turn visibility
-      thread.usage.mainInputTokens += Math.ceil(prompt.length / 4);
+      if (!thread.ephemeralRemote) {
+        const rsid = rt.driver.getRemoteSessionId?.();
+        if (rsid && rsid !== thread.remoteSessionId) {
+          thread.remoteSessionId = rsid;
+        }
+      }
+
+      // Fall back to lightweight token estimate only when backend did not emit exact usage_delta
+      if (!rt.turnReceivedExactUsage) {
+        thread.usage.mainInputTokens += Math.ceil(prompt.length / 4);
+        thread.usage.mainOutputTokens += rt.turnEstimatedOutputTokens;
+      }
       thread.status = "idle";
       thread.updatedAt = new Date().toISOString();
       this.store.upsertThread(thread);
@@ -593,6 +682,22 @@ export class AgentRemoteHub {
         )
       : undefined;
 
+    // Collect prior locally stored conversation history (excluding the just-appended current user_message)
+    const storedEvents = this.store.listEvents(thread.id);
+    const priorEvents =
+      storedEvents.length > 0 && storedEvents[storedEvents.length - 1]?.kind === "user_message"
+        ? storedEvents.slice(0, -1)
+        : storedEvents;
+    const localHistoryContext = formatLocalHistoryContext(priorEvents);
+
+    const willAttemptNativeResume = Boolean(thread.remoteSessionId && !thread.ephemeralRemote);
+    const combinedExtraPrompt = [
+      quotaPrompt,
+      !willAttemptNativeResume && localHistoryContext ? localHistoryContext : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n\n") || undefined;
+
     // Mount configured local stdio MCP servers ([local_mcp.*]) under Policy Gate
     const localMcpConfigs = Object.entries(this.config.local_mcp).map(([name, m]) => ({
       name,
@@ -618,7 +723,9 @@ export class AgentRemoteHub {
       localGitBranch: thread.branch,
       model: thread.model ?? profile.defaultModel,
       effort: thread.effort ?? profile.defaultEffort,
-      quotaSaverPrompt: quotaPrompt,
+      resumeRemoteSessionId: willAttemptNativeResume ? thread.remoteSessionId : undefined,
+      ephemeralRemote: thread.ephemeralRemote,
+      quotaSaverPrompt: combinedExtraPrompt,
       nativePlans: plans,
     });
 
@@ -656,23 +763,38 @@ export class AgentRemoteHub {
       toolEngine: engine,
       model: thread.model ?? profile.defaultModel,
       effort: thread.effort ?? profile.defaultEffort,
+      resumeRemoteSessionId: willAttemptNativeResume ? thread.remoteSessionId : undefined,
+      ephemeralRemote: thread.ephemeralRemote,
       systemPromptAppend: built.systemPromptAppend,
       developerInstructions: built.developerInstructions,
     });
 
-    driver.onEvent((ev) => {
-      if (ev.type === "text_delta" && ev.text) {
-        thread.usage.mainOutputTokens += Math.ceil(ev.text.length / 4);
+    if (!thread.ephemeralRemote) {
+      const rsid = driver.getRemoteSessionId?.();
+      if (rsid && rsid !== thread.remoteSessionId) {
+        thread.remoteSessionId = rsid;
+        this.store.upsertThread(thread);
+        this.broadcast({ type: "thread_updated", payload: thread });
       }
-      const stored = this.store.appendEvent(thread.id, ev.type, ev as Record<string, unknown>);
-      this.broadcast({ type: "thread_event", payload: stored });
+      driver.onRemoteSessionId?.((rsidUpdate) => {
+        if (rsidUpdate && rsidUpdate !== thread.remoteSessionId) {
+          thread.remoteSessionId = rsidUpdate;
+          this.store.upsertThread(thread);
+          this.broadcast({ type: "thread_updated", payload: thread });
+        }
+      });
+    }
+
+    driver.onQuota?.((snap) => {
+      this.store.upsertQuota(snap);
+      this.broadcast({ type: "quota_updated", payload: snap });
     });
 
-    const initialCatalog = driver.getInitialCatalog?.();
-    if (initialCatalog && initialCatalog.models.length > 0) {
-      this.store.upsertCatalog(initialCatalog);
-      this.broadcast({ type: "catalog_updated", payload: initialCatalog });
-    }
+    // If native remote resume was attempted but declined/unavailable, inject restored local history once
+    const pendingHistoryPrefix =
+      willAttemptNativeResume && !driver.resumedRemote && localHistoryContext
+        ? localHistoryContext
+        : undefined;
 
     const rt: ActiveRuntime = {
       threadId: thread.id,
@@ -685,7 +807,41 @@ export class AgentRemoteHub {
       abortController,
       localMcpClients,
       localHttpMcp: spawned.localHttpMcp,
+      pendingHistoryPrefix,
+      turnReceivedExactUsage: false,
+      turnEstimatedOutputTokens: 0,
     };
+
+    driver.onEvent((ev) => {
+      if (ev.type === "usage_delta") {
+        rt.turnReceivedExactUsage = true;
+        thread.usage.mainInputTokens += ev.inputTokens ?? 0;
+        thread.usage.mainOutputTokens += ev.outputTokens ?? 0;
+        thread.usage.mainCachedInputTokens += ev.cachedInputTokens ?? 0;
+        thread.usage.mainReasoningTokens += ev.reasoningTokens ?? 0;
+        if (ev.costUsd !== undefined) {
+          thread.usage.totalCostUsd = Number(
+            ((thread.usage.totalCostUsd ?? 0) + ev.costUsd).toFixed(6),
+          );
+        }
+        thread.usage.exact = true;
+        this.store.upsertThread(thread);
+        this.broadcast({ type: "thread_updated", payload: thread });
+        return;
+      }
+      if (ev.type === "text_delta" && ev.text) {
+        rt.turnEstimatedOutputTokens += Math.ceil(ev.text.length / 4);
+      }
+      const stored = this.store.appendEvent(thread.id, ev.type, ev as unknown as Record<string, unknown>);
+      this.broadcast({ type: "thread_event", payload: stored });
+    });
+
+    const initialCatalog = driver.getInitialCatalog?.();
+    if (initialCatalog && initialCatalog.models.length > 0) {
+      this.store.upsertCatalog(initialCatalog);
+      this.broadcast({ type: "catalog_updated", payload: initialCatalog });
+    }
+
     this.runtimes.set(thread.id, rt);
     return rt;
   }
@@ -735,6 +891,7 @@ export class AgentRemoteHub {
       localGitBranch: parentThread.branch,
       model: call.model ?? profile.defaultModel,
       effort: call.effort ?? profile.defaultEffort,
+      ephemeralRemote: parentThread.ephemeralRemote,
       pureInferenceOnly: call.pureInferenceOnly,
       nativePlans: [],
     });
@@ -746,6 +903,9 @@ export class AgentRemoteHub {
     channel.setMcpHandler((req) => childMcp.handleRpc(req, { sessionId: childId }));
 
     let collected = "";
+    let exactIn = 0;
+    let exactOut = 0;
+    let gotExact = false;
     try {
       const driver = await attachDriverSession({
         agent: profile.agent,
@@ -756,6 +916,7 @@ export class AgentRemoteHub {
         toolEngine: childEngine,
         model: call.model ?? profile.defaultModel,
         effort: call.effort ?? profile.defaultEffort,
+        ephemeralRemote: parentThread.ephemeralRemote,
         systemPromptAppend: built.systemPromptAppend,
         developerInstructions: built.developerInstructions,
       });
@@ -763,6 +924,10 @@ export class AgentRemoteHub {
       driver.onEvent((ev) => {
         if (ev.type === "text_delta" && ev.text) {
           collected += ev.text;
+        } else if (ev.type === "usage_delta") {
+          gotExact = true;
+          exactIn += ev.inputTokens ?? 0;
+          exactOut += ev.outputTokens ?? 0;
         }
       });
 
@@ -771,8 +936,8 @@ export class AgentRemoteHub {
         effort: call.effort ?? profile.defaultEffort,
       });
 
-      const inTok = Math.ceil(call.task.length / 4);
-      const outTok = Math.ceil(collected.length / 4);
+      const inTok = gotExact ? exactIn : Math.ceil(call.task.length / 4);
+      const outTok = gotExact ? exactOut : Math.ceil(collected.length / 4);
       const doneEv = this.store.appendEvent(parentThread.id, "subagent_completed", {
         childId,
         subagentName: call.subagentName,

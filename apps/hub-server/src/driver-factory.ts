@@ -9,6 +9,7 @@ import {
 import {
   buildCodexSpawnSpec,
   CodexAppServerSession,
+  parseCodexRateLimits,
 } from "@agent-remote/driver-codex";
 import { buildFactoryDroidSpawnSpec } from "@agent-remote/driver-factory-droid";
 import { buildGeminiSpawnSpec } from "@agent-remote/driver-gemini";
@@ -17,16 +18,37 @@ import { buildOpenCodeSpawnSpec } from "@agent-remote/driver-opencode";
 import type {
   AgentKind,
   CatalogSnapshot,
+  QuotaSnapshot,
   SpawnSessionPayload,
   ThinkingEffort,
 } from "@agent-remote/protocol";
 import type { ResolvedSubagentPlan } from "@agent-remote/subagent-orchestrator";
-import type { LocalToolEngine } from "@agent-remote/tool-plane";
+import {
+  LocalToolEngine,
+  PolicyEngine,
+  WorkspaceSandbox,
+} from "@agent-remote/tool-plane";
 import type { RemoteSessionChannel } from "@agent-remote/transport";
+
+export interface DriverEventPayload {
+  type: string;
+  text?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+  exact?: boolean;
+}
 
 export interface UnifiedDriverSession {
   readonly agent: AgentKind;
-  onEvent(cb: (ev: { type: string; text?: string }) => void): void;
+  readonly resumedRemote: boolean;
+  onEvent(cb: (ev: DriverEventPayload) => void): void;
+  onRemoteSessionId?: (cb: (remoteSessionId: string) => void) => void;
+  onQuota?: (cb: (snapshot: QuotaSnapshot) => void) => void;
+  getRemoteSessionId?: () => string | undefined;
+  readQuota?: () => Promise<QuotaSnapshot | undefined>;
   prompt(text: string, opts?: { model?: string; effort?: ThinkingEffort }): Promise<void>;
   cancel(): void;
   getInitialCatalog?: () => CatalogSnapshot | undefined;
@@ -42,6 +64,8 @@ export interface DriverBootstrapInput {
   localGitBranch?: string;
   model?: string;
   effort?: ThinkingEffort;
+  resumeRemoteSessionId?: string;
+  ephemeralRemote?: boolean;
   quotaSaverPrompt?: string;
   pureInferenceOnly?: boolean;
   nativePlans: ResolvedSubagentPlan[];
@@ -89,6 +113,8 @@ export function buildSpawnSpecForAgent(input: DriverBootstrapInput): {
           remoteBin: input.remoteBin,
           model: input.model,
           effort: input.effort,
+          resumeRemoteSessionId: input.resumeRemoteSessionId,
+          ephemeralRemote: input.ephemeralRemote,
           localWorkspaceRoot: input.localWorkspaceRoot,
           localGitBranch: input.localGitBranch,
           quotaSaverPrompt: input.quotaSaverPrompt,
@@ -102,6 +128,7 @@ export function buildSpawnSpecForAgent(input: DriverBootstrapInput): {
         remoteBin: input.remoteBin,
         model: input.model,
         effort: input.effort,
+        ephemeralRemote: input.ephemeralRemote,
         localWorkspaceRoot: input.localWorkspaceRoot,
         quotaSaverPrompt: input.quotaSaverPrompt,
         nativeSubagents,
@@ -155,6 +182,8 @@ export async function attachDriverSession(params: {
   toolEngine: LocalToolEngine;
   model?: string;
   effort?: ThinkingEffort;
+  resumeRemoteSessionId?: string;
+  ephemeralRemote?: boolean;
   systemPromptAppend?: string;
   developerInstructions?: string;
 }): Promise<UnifiedDriverSession> {
@@ -162,7 +191,10 @@ export async function attachDriverSession(params: {
     const claude = new ClaudeStreamSession(params.channel, params.sessionId);
     return {
       agent: "claude",
+      resumedRemote: Boolean(params.resumeRemoteSessionId && !params.ephemeralRemote),
       onEvent: (cb) => claude.on("event", cb),
+      onRemoteSessionId: (cb) => claude.on("remote_session_id", cb),
+      getRemoteSessionId: () => claude.getRemoteSessionId(),
       prompt: (text) => claude.prompt(text),
       cancel: () => claude.cancel(),
     };
@@ -190,14 +222,23 @@ export async function attachDriverSession(params: {
     } catch {
       // Optional live model list
     }
-    await codex.startThread({
+    const started = await codex.resumeOrStartThread({
+      resumeThreadId: params.resumeRemoteSessionId,
+      ephemeral: params.ephemeralRemote,
       model: params.model,
       effort: params.effort,
       developerInstructions: params.developerInstructions,
     });
     return {
       agent: "codex",
+      resumedRemote: started.resumed,
       onEvent: (cb) => codex.on("event", cb),
+      onQuota: (cb) =>
+        codex.on("quota_raw", (raw) =>
+          cb(parseCodexRateLimits(raw, params.hostId, params.profileId)),
+        ),
+      getRemoteSessionId: () => codex.getRemoteSessionId(),
+      readQuota: () => codex.readRateLimits(params.hostId, params.profileId),
       prompt: (text, opts) => codex.prompt(text, opts),
       cancel: () => codex.cancel(),
       getInitialCatalog: () => initialCatalog,
@@ -212,7 +253,8 @@ export async function attachDriverSession(params: {
     blockRemoteBuiltins: true,
   });
   await acp.initialize();
-  const sessNew = await acp.startSession({
+  const started = await acp.resumeOrStartSession({
+    resumeSessionId: params.ephemeralRemote ? undefined : params.resumeRemoteSessionId,
     systemPromptAppend: params.systemPromptAppend,
   });
 
@@ -221,14 +263,16 @@ export async function attachDriverSession(params: {
       params.hostId,
       params.profileId,
       params.agent === "opencode" ? "opencode" : "antigravity",
-      sessNew,
+      started.result,
     ),
     agent: params.agent,
   };
 
   return {
     agent: params.agent,
+    resumedRemote: started.resumed,
     onEvent: (cb) => acp.on("event", cb),
+    getRemoteSessionId: () => acp.getRemoteSessionId(),
     prompt: async (text, opts) => {
       try {
         await acp.setModelAndEffort(opts?.model, opts?.effort);
@@ -240,4 +284,23 @@ export async function attachDriverSession(params: {
     cancel: () => acp.cancel(),
     getInitialCatalog: () => (initialCatalog.models.length > 0 ? initialCatalog : undefined),
   };
+}
+
+/**
+ * Performs a lightweight one-shot `codex app-server` `account/rateLimits/read` query over a remote channel.
+ */
+export async function probeCodexRateLimitsOverChannel(params: {
+  hostId: string;
+  profileId: string;
+  sessionId: string;
+  channel: RemoteSessionChannel;
+  cwd?: string;
+}): Promise<QuotaSnapshot> {
+  const dummyEngine = new LocalToolEngine({
+    sandbox: new WorkspaceSandbox({ workspaceRoot: params.cwd ?? process.cwd(), readOnly: true }),
+    policy: new PolicyEngine({ mode: "plan" }),
+  });
+  const codex = new CodexAppServerSession(params.channel, dummyEngine, params.sessionId);
+  await codex.initialize();
+  return await codex.readRateLimits(params.hostId, params.profileId);
 }

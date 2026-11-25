@@ -13,6 +13,9 @@ describe("ar chat slash commands & diff rendering", () => {
       arg: "xhigh",
     });
     expect(parseChatSlashCommand("/quota")).toEqual({ kind: "quota", arg: undefined });
+    expect(parseChatSlashCommand("/usage")).toEqual({ kind: "usage", arg: undefined });
+    expect(parseChatSlashCommand("/history")).toEqual({ kind: "history", arg: undefined });
+    expect(parseChatSlashCommand("/threads")).toEqual({ kind: "threads", arg: undefined });
     expect(parseChatSlashCommand("/quit")).toEqual({ kind: "exit" });
   });
 

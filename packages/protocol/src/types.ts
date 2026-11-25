@@ -123,8 +123,12 @@ export type TaskOverride = z.infer<typeof TaskOverrideSchema>;
 export const TokenUsageBreakdownSchema = z.object({
   mainInputTokens: z.number().int().nonnegative().default(0),
   mainOutputTokens: z.number().int().nonnegative().default(0),
+  mainCachedInputTokens: z.number().int().nonnegative().default(0),
+  mainReasoningTokens: z.number().int().nonnegative().default(0),
   offloadedInputTokens: z.number().int().nonnegative().default(0),
   offloadedOutputTokens: z.number().int().nonnegative().default(0),
+  totalCostUsd: z.number().nonnegative().optional(),
+  exact: z.boolean().default(false),
 });
 export type TokenUsageBreakdown = z.infer<typeof TokenUsageBreakdownSchema>;
 

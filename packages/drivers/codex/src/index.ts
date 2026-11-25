@@ -3,6 +3,8 @@ import os from "node:os";
 import {
   THINKING_EFFORTS,
   type ModelCatalogEntry,
+  type QuotaSnapshot,
+  type QuotaWindow,
   type SpawnSessionPayload,
   type SubagentBlueprint,
   type ThinkingEffort,
@@ -21,6 +23,7 @@ export interface CodexLaunchOptions {
   remoteBin?: string;
   model?: string;
   effort?: ThinkingEffort;
+  ephemeralRemote?: boolean;
   localWorkspaceRoot: string;
   quotaSaverPrompt?: string;
   nativeSubagents?: CodexSubagentSpec[];
@@ -80,6 +83,9 @@ export function buildCodexSpawnSpec(options: CodexLaunchOptions): {
   if (options.effort) {
     args.push("-c", `model_reasoning_effort=${JSON.stringify(options.effort)}`);
   }
+  if (options.ephemeralRemote) {
+    args.push("-c", "ephemeral=true");
+  }
 
   return {
     spawn: {
@@ -131,6 +137,128 @@ export function parseCodexModelList(res: CodexModelListResponse): ModelCatalogEn
     });
 }
 
+export interface CodexRateLimitWindowRaw {
+  usedPercent?: number;
+  used_percent?: number;
+  windowDurationMins?: number;
+  window_duration_mins?: number;
+  resetsAt?: number | string;
+  resets_at?: number | string;
+}
+
+export interface CodexRateLimitsSnapshotRaw {
+  limitId?: string;
+  limitName?: string;
+  planType?: string;
+  plan_type?: string;
+  primary?: CodexRateLimitWindowRaw | null;
+  secondary?: CodexRateLimitWindowRaw | null;
+  credits?: {
+    hasCredits?: boolean;
+    unlimited?: boolean;
+    balance?: string | number | null;
+  } | null;
+}
+
+function formatCodexWindowLabel(
+  w: CodexRateLimitWindowRaw,
+  fallback: string,
+  prefix?: string,
+): string {
+  const mins = w.windowDurationMins ?? w.window_duration_mins;
+  let base = fallback;
+  if (mins === 300) base = "5-Hour Window";
+  else if (mins === 10080) base = "Weekly Cap";
+  else if (typeof mins === "number" && mins > 0) {
+    base = mins % 60 === 0 ? `${mins / 60}h Window` : `${mins}m Window`;
+  }
+  return prefix ? `${prefix} · ${base}` : base;
+}
+
+function normalizeResetTime(raw?: number | string): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const ms = raw > 1e12 ? raw : raw * 1000;
+    return new Date(ms).toISOString();
+  }
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return undefined;
+}
+
+function pushCodexWindow(
+  out: QuotaWindow[],
+  w: CodexRateLimitWindowRaw | null | undefined,
+  fallbackLabel: string,
+  prefix?: string,
+): void {
+  if (!w) return;
+  const usedRaw = w.usedPercent ?? w.used_percent;
+  if (typeof usedRaw !== "number" || !Number.isFinite(usedRaw)) return;
+  const used = Math.max(0, Math.min(100, usedRaw));
+  const rem = Math.max(0, Math.min(100, 100 - used));
+  out.push({
+    label: formatCodexWindowLabel(w, fallbackLabel, prefix),
+    usedPercent: used,
+    remainingPercent: rem,
+    resetsAt: normalizeResetTime(w.resetsAt ?? w.resets_at),
+  });
+}
+
+/**
+ * Parses `codex app-server` `account/rateLimits/read` or `account/rateLimits/updated` payloads
+ * into a normalized `QuotaSnapshot`.
+ */
+export function parseCodexRateLimits(
+  raw: unknown,
+  hostId: string,
+  profileId: string,
+): QuotaSnapshot {
+  const obj = (raw ?? {}) as {
+    rateLimits?: CodexRateLimitsSnapshotRaw;
+    rateLimitsByLimitId?: Record<string, CodexRateLimitsSnapshotRaw>;
+  } & CodexRateLimitsSnapshotRaw;
+
+  const main = obj.rateLimits ?? obj;
+  const windows: QuotaWindow[] = [];
+  pushCodexWindow(windows, main.primary, "Primary Window");
+  pushCodexWindow(windows, main.secondary, "Secondary Window");
+
+  if (obj.rateLimitsByLimitId) {
+    for (const [limitId, snap] of Object.entries(obj.rateLimitsByLimitId)) {
+      if (snap === main || limitId === main.limitId) continue;
+      const prefix = snap.limitName || limitId;
+      pushCodexWindow(windows, snap.primary, "Primary Window", prefix);
+      pushCodexWindow(windows, snap.secondary, "Secondary Window", prefix);
+    }
+  }
+
+  if (main.credits) {
+    if (main.credits.unlimited) {
+      windows.push({ label: "Codex Credits", remainingAmount: "Unlimited" });
+    } else if (main.credits.balance !== undefined && main.credits.balance !== null) {
+      windows.push({
+        label: "Codex Credits",
+        remainingAmount: String(main.credits.balance),
+      });
+    }
+  }
+
+  return {
+    hostId,
+    profileId,
+    agent: "codex",
+    available: windows.length > 0,
+    source: windows.length > 0 ? "app-server-rpc" : "unavailable",
+    planTier: main.planType ?? main.plan_type,
+    windows,
+    note:
+      windows.length === 0
+        ? "Codex app-server did not return active rate limit windows (API-key mode or unauthenticated)."
+        : undefined,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 interface JsonRpcMsg {
   jsonrpc?: "2.0";
   id?: number | string;
@@ -156,6 +284,7 @@ export class CodexAppServerSession extends EventEmitter {
   private buf = "";
   private threadId?: string;
   private turnDone?: () => void;
+  private turnEmittedUsage = false;
   private readonly pending = new Map<
     number,
     { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
@@ -185,6 +314,10 @@ export class CodexAppServerSession extends EventEmitter {
     });
   }
 
+  getRemoteSessionId(): string | undefined {
+    return this.threadId;
+  }
+
   async initialize(): Promise<unknown> {
     const res = await this.request("initialize", {
       clientInfo: { name: "agent-remote", version: "0.1.0" },
@@ -198,9 +331,15 @@ export class CodexAppServerSession extends EventEmitter {
     return parseCodexModelList(res);
   }
 
+  async readRateLimits(hostId: string, profileId: string): Promise<QuotaSnapshot> {
+    const res = await this.request("account/rateLimits/read", {});
+    return parseCodexRateLimits(res, hostId, profileId);
+  }
+
   async startThread(options: {
     model?: string;
     effort?: ThinkingEffort;
+    ephemeral?: boolean;
     developerInstructions?: string;
   }): Promise<string> {
     const dynamicTools = this.toolEngine.listToolDefinitions().map((t) => ({
@@ -209,21 +348,64 @@ export class CodexAppServerSession extends EventEmitter {
       inputSchema: t.inputSchema,
     }));
 
-    const res = (await this.request("thread/start", {
+    const params: Record<string, unknown> = {
       model: options.model,
       reasoning_effort: options.effort,
       developerInstructions: options.developerInstructions,
       approvalPolicy: "untrusted",
       sandbox: "read-only",
       dynamicTools,
-    })) as { thread?: { id?: string }; threadId?: string };
+    };
+    if (options.ephemeral) {
+      params.ephemeral = true;
+    }
+
+    const res = (await this.request("thread/start", params)) as {
+      thread?: { id?: string };
+      threadId?: string;
+    };
 
     this.threadId = res.thread?.id ?? res.threadId ?? "default";
     return this.threadId;
   }
 
+  async resumeOrStartThread(options: {
+    resumeThreadId?: string;
+    ephemeral?: boolean;
+    model?: string;
+    effort?: ThinkingEffort;
+    developerInstructions?: string;
+  }): Promise<{ threadId: string; resumed: boolean }> {
+    if (options.resumeThreadId && !options.ephemeral) {
+      const dynamicTools = this.toolEngine.listToolDefinitions().map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+      }));
+      try {
+        const res = (await this.request("thread/resume", {
+          threadId: options.resumeThreadId,
+          model: options.model,
+          reasoning_effort: options.effort,
+          developerInstructions: options.developerInstructions,
+          approvalPolicy: "untrusted",
+          sandbox: "read-only",
+          dynamicTools,
+        })) as { thread?: { id?: string }; threadId?: string };
+        this.threadId = res.thread?.id ?? res.threadId ?? options.resumeThreadId;
+        return { threadId: this.threadId, resumed: true };
+      } catch {
+        // Fall back to fresh thread/start
+      }
+    }
+
+    const threadId = await this.startThread(options);
+    return { threadId, resumed: false };
+  }
+
   async prompt(text: string, options?: { model?: string; effort?: ThinkingEffort }): Promise<void> {
     if (!this.threadId) throw new Error("Codex thread not started");
+    this.turnEmittedUsage = false;
     return await new Promise<void>((resolve, reject) => {
       this.turnDone = resolve;
       void this.request(
@@ -310,7 +492,32 @@ export class CodexAppServerSession extends EventEmitter {
       if (delta) {
         this.emit("event", { type: "thought_delta", sessionId: this.localSessionId, text: delta });
       }
+    } else if (msg.method === "account/rateLimits/updated") {
+      this.emit("quota_raw", msg.params ?? {});
+    } else if (msg.method === "thread/tokenUsage/updated") {
+      const usage = extractCodexUsage(msg.params);
+      if (usage) {
+        this.turnEmittedUsage = true;
+        this.emit("event", {
+          type: "usage_delta",
+          sessionId: this.localSessionId,
+          ...usage,
+          exact: true,
+        });
+      }
     } else if (msg.method === "turn/completed") {
+      if (!this.turnEmittedUsage) {
+        const usage = extractCodexUsage(msg.params);
+        if (usage) {
+          this.turnEmittedUsage = true;
+          this.emit("event", {
+            type: "usage_delta",
+            sessionId: this.localSessionId,
+            ...usage,
+            exact: true,
+          });
+        }
+      }
       this.turnDone?.();
       this.turnDone = undefined;
     }
@@ -362,4 +569,38 @@ export class CodexAppServerSession extends EventEmitter {
       error: { code: -32601, message: `Unsupported Codex server request: ${method}` },
     });
   }
+}
+
+function extractCodexUsage(params?: Record<string, unknown>): {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
+} | null {
+  if (!params || typeof params !== "object") return null;
+  const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
+  const info = params.info as Record<string, unknown> | undefined;
+  const turn = params.turn as Record<string, unknown> | undefined;
+  const raw = (tokenUsage?.last ??
+    info?.last_token_usage ??
+    turn?.usage ??
+    params.usage ??
+    tokenUsage) as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object") return null;
+
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0);
+  const inputTokens = num(raw.inputTokens ?? raw.input_tokens);
+  const outputTokens = num(raw.outputTokens ?? raw.output_tokens);
+  const cachedInputTokens = num(raw.cachedInputTokens ?? raw.cached_input_tokens);
+  const reasoningTokens = num(raw.reasoningOutputTokens ?? raw.reasoning_output_tokens);
+
+  if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0 && reasoningTokens === 0) {
+    return null;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+  };
 }

@@ -88,12 +88,18 @@ export interface ThreadState {
   effort?: ThinkingEffort;
   mode: string;
   quotaSaverMode: boolean;
+  remoteSessionId?: string;
+  ephemeralRemote?: boolean;
   subagentOverrides: Record<string, SubagentOverride>;
   usage: {
     mainInputTokens: number;
     mainOutputTokens: number;
+    mainCachedInputTokens?: number;
+    mainReasoningTokens?: number;
     offloadedInputTokens: number;
     offloadedOutputTokens: number;
+    totalCostUsd?: number;
+    exact?: boolean;
   };
   status: "idle" | "running" | "waiting_approval" | "error";
   createdAt: string;

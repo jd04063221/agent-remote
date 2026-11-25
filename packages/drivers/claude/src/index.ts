@@ -32,6 +32,8 @@ export interface ClaudeLaunchOptions {
   model?: string;
   effort?: ThinkingEffort;
   resumeRemoteSessionId?: string;
+  /** When true, passes `--no-session-persistence` so Claude does not persist transcripts on the remote host. */
+  ephemeralRemote?: boolean;
   localWorkspaceRoot: string;
   localGitBranch?: string;
   quotaSaverPrompt?: string;
@@ -118,7 +120,11 @@ export function buildClaudeSpawnSpec(options: ClaudeLaunchOptions): SpawnSession
 
   if (options.model) args.push("--model", options.model);
   if (options.effort) args.push("--effort", options.effort);
-  if (options.resumeRemoteSessionId) args.push("--resume", options.resumeRemoteSessionId);
+  if (options.ephemeralRemote) {
+    args.push("--no-session-persistence");
+  } else if (options.resumeRemoteSessionId) {
+    args.push("--resume", options.resumeRemoteSessionId);
+  }
 
   return {
     sessionId: options.sessionId,
@@ -140,6 +146,7 @@ export class ClaudeStreamSession extends EventEmitter {
   private buf = "";
   private remoteSessionId?: string;
   private turnResolver?: () => void;
+  private pendingTurnUsage = { input: 0, output: 0, cached: 0 };
 
   constructor(channel: RemoteSessionChannel, localSessionId: string) {
     super();
@@ -160,6 +167,7 @@ export class ClaudeStreamSession extends EventEmitter {
   }
 
   async prompt(text: string): Promise<void> {
+    this.pendingTurnUsage = { input: 0, output: 0, cached: 0 };
     return await new Promise<void>((resolve) => {
       this.turnResolver = resolve;
       const msg = {
@@ -187,11 +195,24 @@ export class ClaudeStreamSession extends EventEmitter {
       } catch {
         continue;
       }
-      if (typeof ev.session_id === "string") {
+      if (typeof ev.session_id === "string" && ev.session_id) {
         this.remoteSessionId = ev.session_id;
+        this.emit("remote_session_id", ev.session_id);
       }
       if (ev.type === "assistant") {
-        const msg = ev.message as { content?: Array<Record<string, unknown>> } | undefined;
+        const msg = ev.message as
+          | {
+              content?: Array<Record<string, unknown>>;
+              usage?: Record<string, unknown>;
+            }
+          | undefined;
+        if (msg?.usage) {
+          this.pendingTurnUsage.input += Number(msg.usage.input_tokens ?? 0) || 0;
+          this.pendingTurnUsage.output += Number(msg.usage.output_tokens ?? 0) || 0;
+          this.pendingTurnUsage.cached +=
+            (Number(msg.usage.cache_read_input_tokens ?? 0) || 0) +
+            (Number(msg.usage.cache_creation_input_tokens ?? 0) || 0);
+        }
         for (const block of msg?.content ?? []) {
           if (block.type === "thinking" && typeof block.thinking === "string") {
             this.emit("event", {
@@ -208,6 +229,28 @@ export class ClaudeStreamSession extends EventEmitter {
           }
         }
       } else if (ev.type === "result") {
+        const u = ev.usage as Record<string, unknown> | undefined;
+        const inputTokens = u ? Number(u.input_tokens ?? 0) || 0 : this.pendingTurnUsage.input;
+        const outputTokens = u ? Number(u.output_tokens ?? 0) || 0 : this.pendingTurnUsage.output;
+        const cachedInputTokens = u
+          ? (Number(u.cache_read_input_tokens ?? 0) || 0) +
+            (Number(u.cache_creation_input_tokens ?? 0) || 0)
+          : this.pendingTurnUsage.cached;
+        const costRaw = ev.total_cost_usd ?? ev.cost_usd;
+        const costUsd = typeof costRaw === "number" && Number.isFinite(costRaw) ? costRaw : undefined;
+
+        if (inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0) {
+          this.emit("event", {
+            type: "usage_delta",
+            sessionId: this.localSessionId,
+            inputTokens,
+            outputTokens,
+            ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
+            exact: true,
+          });
+        }
+        this.pendingTurnUsage = { input: 0, output: 0, cached: 0 };
         this.turnResolver?.();
         this.turnResolver = undefined;
       }

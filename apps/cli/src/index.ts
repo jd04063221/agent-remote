@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { runAcpStdioBridge } from "@agent-remote/acp-server";
 import {
@@ -13,6 +12,9 @@ import {
   AgentRemoteHub,
   attachDriverSession,
   buildSpawnSpecForAgent,
+  getDefaultDbPath,
+  HubStore,
+  probeCodexRateLimitsOverChannel,
 } from "@agent-remote/hub-server";
 import {
   parseAgyModelsOutput,
@@ -53,42 +55,112 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "threads": {
+      const cfg = loadAgentRemoteConfig();
+      const dbPath = getDefaultDbPath(getFlag("--db") ?? cfg.hub.db_path);
+      const limit = Number(getFlag("--limit", "25"));
+      const store = new HubStore(dbPath);
+      try {
+        const threads = store.listThreads().slice(0, limit);
+        if (threads.length === 0) {
+          console.log(`No saved threads in ${dbPath}`);
+          break;
+        }
+        console.log(`Local Threads (${dbPath}):`);
+        for (const t of threads) {
+          const tokens = t.usage.mainInputTokens + t.usage.mainOutputTokens;
+          const flags = [
+            t.ephemeralRemote ? "incognito" : t.remoteSessionId ? "resumable" : "local-only",
+            t.usage.exact ? `${tokens} tok (exact)` : `~${tokens} tok`,
+          ].join(" | ");
+          console.log(
+            `  ${t.id}  ${t.profileId.padEnd(14)}  ${t.branch.padEnd(12)}  [${flags}]  ${t.title}`,
+          );
+        }
+      } finally {
+        store.close();
+      }
+      break;
+    }
+
     case "chat": {
       const cfg = loadAgentRemoteConfig();
-      const profileKey = getFlag("--profile") ?? cfg.hub.default_profile;
-      const prof = profileKey ? cfg.profiles[profileKey] : undefined;
-      const host = prof ? cfg.hosts[prof.host] : undefined;
+      const dbPath = getDefaultDbPath(getFlag("--db") ?? cfg.hub.db_path);
+      const resumeThreadId = getFlag("--resume") ?? getFlag("--thread");
+      const noSave = args.includes("--no-save");
+      const ephemeralFlag = args.includes("--ephemeral") || args.includes("--incognito");
 
-      const endpoint = getFlag("--endpoint") ?? host?.endpoint;
+      let hostId: string | undefined;
+      let profileKey = getFlag("--profile") ?? cfg.hub.default_profile;
+      let endpoint = getFlag("--endpoint");
+      let bearerToken = getFlag("--token");
+      let agent = getFlag("--agent") as AgentKind | undefined;
+      let remoteBin = getFlag("--remote-bin");
+      let model = getFlag("--model");
+      let effort = getFlag("--effort") as ThinkingEffort | undefined;
+      let cwd = getFlag("--cwd");
+
+      if (resumeThreadId) {
+        const peekStore = new HubStore(dbPath);
+        try {
+          const existing = peekStore.getThread(resumeThreadId);
+          if (!existing) {
+            console.error(`Thread not found in ${dbPath}: ${resumeThreadId}`);
+            process.exit(1);
+          }
+          hostId = existing.hostId;
+          profileKey = profileKey ?? existing.profileId;
+          const storedProf = peekStore.getProfile(existing.profileId);
+          const storedHost = peekStore.getHost(existing.hostId);
+          endpoint = endpoint ?? storedHost?.endpoint;
+          bearerToken = bearerToken ?? storedHost?.bearerToken;
+          agent = agent ?? storedProf?.agent;
+          remoteBin = remoteBin ?? storedProf?.remoteBin;
+          model = model ?? existing.model ?? storedProf?.defaultModel;
+          effort = effort ?? existing.effort ?? storedProf?.defaultEffort;
+          cwd = cwd ?? existing.worktreePath;
+        } finally {
+          peekStore.close();
+        }
+      }
+
+      const prof = profileKey ? cfg.profiles[profileKey] : undefined;
+      const host = prof ? cfg.hosts[prof.host] : hostId ? cfg.hosts[hostId] : undefined;
+      endpoint = endpoint ?? host?.endpoint;
+
       if (!endpoint) {
         console.error(
-          "Usage: ar chat --endpoint wss://<node>.ts.net/v1/ws [--agent antigravity] [--model ...] [--effort high] (or run `ar init` to configure default_profile)",
+          "Usage: ar chat [--resume <threadId>] [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--agent antigravity] [--ephemeral]",
         );
         process.exit(1);
       }
 
       await runInteractiveChat({
         endpoint,
-        bearerToken:
-          getFlag("--token") ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
-        agent: (getFlag("--agent") as AgentKind | undefined) ?? prof?.agent ?? "antigravity",
-        remoteBin: getFlag("--remote-bin") ?? prof?.remote_bin,
-        model: getFlag("--model") ?? prof?.default_model,
-        effort:
-          (getFlag("--effort") as ThinkingEffort | undefined) ?? prof?.default_effort,
+        bearerToken: bearerToken ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
+        hostId: hostId ?? prof?.host,
+        profileId: profileKey,
+        agent: agent ?? prof?.agent ?? "antigravity",
+        remoteBin: remoteBin ?? prof?.remote_bin,
+        model: model ?? prof?.default_model,
+        effort: effort ?? prof?.default_effort,
         mode: (getFlag("--mode") as PermissionMode | undefined) ?? cfg.permissions.default_mode,
-        cwd: getFlag("--cwd", process.cwd())!,
+        cwd: cwd ?? process.cwd(),
+        dbPath,
+        noSave,
+        resumeThreadId,
+        title: getFlag("--title"),
+        ephemeralRemote: ephemeralFlag ? true : resumeThreadId ? undefined : cfg.hub.ephemeral_remote,
       });
       break;
     }
 
     case "hub":
     case "ui": {
+      const cfg = loadAgentRemoteConfig();
       const port = Number(getFlag("--port", "3775"));
       const host = getFlag("--host", "127.0.0.1")!;
-      const dbPath =
-        getFlag("--db") ??
-        path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
+      const dbPath = getDefaultDbPath(getFlag("--db") ?? cfg.hub.db_path);
       const webDistDir = path.resolve(import.meta.dirname, "../../web/dist");
 
       const hub = new AgentRemoteHub({ dbPath, webDistDir });
@@ -266,22 +338,51 @@ async function main(): Promise<void> {
     }
 
     case "quota": {
-      const endpoint = getFlag("--endpoint");
-      const agent = getFlag("--agent", "antigravity")!;
+      const cfg = loadAgentRemoteConfig();
+      const profileKey = getFlag("--profile");
+      const prof = profileKey ? cfg.profiles[profileKey] : undefined;
+      const host = prof ? cfg.hosts[prof.host] : undefined;
+      const endpoint = getFlag("--endpoint") ?? host?.endpoint;
+      const agent = getFlag("--agent") ?? prof?.agent ?? "antigravity";
+      const remoteBin = getFlag("--remote-bin") ?? prof?.remote_bin;
       if (!endpoint) {
         console.error(
-          "Usage: ar quota --endpoint wss://<node>.ts.net/v1/ws [--agent claude|opencode|antigravity] [--token ...]",
+          "Usage: ar quota [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--agent claude|codex|opencode|antigravity] [--token ...]",
         );
         process.exit(1);
       }
       const client = new TailnetDirectClient({
-        hostId: "quota",
+        hostId: prof?.host ?? "quota",
         endpoint,
-        bearerToken: getFlag("--token", process.env.AGENT_REMOTE_DEV_TOKEN),
+        bearerToken: getFlag("--token") ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
         autoReconnect: false,
       });
       await client.connect();
-      const q = await client.fetchQuota(agent);
+      let q;
+      if (agent === "codex") {
+        const sid = `quota-codex-${crypto.randomBytes(3).toString("hex")}`;
+        const ch = await client.spawnSession({
+          sessionId: sid,
+          agent: "codex",
+          command: remoteBin ?? "codex",
+          args: ["app-server", "-c", 'sandbox_mode="read-only"', "-c", "ephemeral=true"],
+          env: {},
+          ephemeralFiles: {},
+          enableMcpBridge: false,
+        });
+        try {
+          q = await probeCodexRateLimitsOverChannel({
+            hostId: prof?.host ?? "quota",
+            profileId: profileKey ?? "codex",
+            sessionId: sid,
+            channel: ch,
+          });
+        } finally {
+          ch.kill();
+        }
+      } else {
+        q = await client.fetchQuota(agent, remoteBin);
+      }
       console.log(`Agent: ${q.agent} | Available: ${q.available} | Source: ${q.source}${q.planTier ? ` | Tier: ${q.planTier}` : ""}`);
       for (const w of q.windows) {
         const val =
@@ -333,13 +434,14 @@ echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
 Commands:
   ar init [--path <toml>] [--force]            Create starter ~/.config/agent-remote/config.toml
   ar ui [--port 3775] [--host 127.0.0.1]       Start Local Hub + t3code-style Web Workbench
-  ar chat [--profile <id> | --endpoint <ws>]   Start interactive terminal chat with slash commands
+  ar chat [--resume <id> | --profile <id>]     Interactive chat (shared local SQLite + --ephemeral)
+  ar threads [--limit 25] [--db <sqlite>]      List locally persisted threads shared by CLI & Web
   ar hub [--port 3775] [--db <sqlite>]         Start Local Hub Server
   ar exec --endpoint <ws> -p "<prompt>"        Headless remote execution with local tools
   ar acp --endpoint <ws> [options]             Run standard ACP stdio bridge (Zed/JetBrains)
   ar doctor --endpoint <ws> [--token ...]      Probe remote Tailnet node & all 7 CLIs
   ar models --endpoint <ws> [--agent agy]      Fetch live remote model & effort catalog
-  ar quota --endpoint <ws> [--agent claude]    Query remote agent remaining quota / balance
+  ar quota [--profile <id> | --endpoint <ws>]  Query remote remaining quota / balance (incl. Codex)
   ar node deploy-script [--port 19420]         Generate remote systemd + tailscale serve script
 `);
   }

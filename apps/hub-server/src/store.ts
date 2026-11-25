@@ -1,6 +1,11 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+
+export function getDefaultDbPath(override?: string): string {
+  return override ?? path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
+}
 import type {
   AgentKind,
   CatalogSnapshot,
@@ -45,6 +50,8 @@ export interface ThreadRecord {
   effort?: ThinkingEffort;
   mode: string;
   quotaSaverMode: boolean;
+  remoteSessionId?: string;
+  ephemeralRemote: boolean;
   subagentOverrides: Record<string, SubagentTaskOverride>;
   usage: TokenUsageBreakdown;
   status: "idle" | "running" | "waiting_approval" | "error";
@@ -164,6 +171,8 @@ export class HubStore {
         effort TEXT,
         mode TEXT NOT NULL DEFAULT 'default',
         quota_saver_mode INTEGER NOT NULL DEFAULT 0,
+        remote_session_id TEXT,
+        ephemeral_remote INTEGER NOT NULL DEFAULT 0,
         subagent_overrides_json TEXT NOT NULL DEFAULT '{}',
         usage_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'idle',
@@ -180,6 +189,16 @@ export class HubStore {
       );
       CREATE INDEX IF NOT EXISTS idx_thread_events_tid ON thread_events(thread_id, id);
     `);
+
+    // Forward-compatible column migrations for existing ~/.config/agent-remote/hub.sqlite files
+    const cols = this.db.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>;
+    const colSet = new Set(cols.map((c) => c.name));
+    if (!colSet.has("remote_session_id")) {
+      this.db.exec("ALTER TABLE threads ADD COLUMN remote_session_id TEXT");
+    }
+    if (!colSet.has("ephemeral_remote")) {
+      this.db.exec("ALTER TABLE threads ADD COLUMN ephemeral_remote INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   private seedDefaults(): void {
@@ -366,13 +385,15 @@ export class HubStore {
       .prepare(
         `INSERT INTO threads (
            id, title, workspace_root, worktree_path, branch, host_id, profile_id,
-           model, effort, mode, quota_saver_mode, subagent_overrides_json, usage_json,
-           status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           model, effort, mode, quota_saver_mode, remote_session_id, ephemeral_remote,
+           subagent_overrides_json, usage_json, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title=excluded.title, host_id=excluded.host_id, profile_id=excluded.profile_id,
            model=excluded.model, effort=excluded.effort, mode=excluded.mode,
            quota_saver_mode=excluded.quota_saver_mode,
+           remote_session_id=excluded.remote_session_id,
+           ephemeral_remote=excluded.ephemeral_remote,
            subagent_overrides_json=excluded.subagent_overrides_json,
            usage_json=excluded.usage_json, status=excluded.status, updated_at=excluded.updated_at`,
       )
@@ -388,6 +409,8 @@ export class HubStore {
         thread.effort ?? null,
         thread.mode,
         thread.quotaSaverMode ? 1 : 0,
+        thread.remoteSessionId ?? null,
+        thread.ephemeralRemote ? 1 : 0,
         JSON.stringify(thread.subagentOverrides),
         JSON.stringify(thread.usage),
         thread.status,
@@ -447,6 +470,8 @@ function rowToThread(r: Record<string, unknown>): ThreadRecord {
     effort: r.effort ? (String(r.effort) as ThinkingEffort) : undefined,
     mode: String(r.mode || "default"),
     quotaSaverMode: Number(r.quota_saver_mode) === 1,
+    remoteSessionId: r.remote_session_id ? String(r.remote_session_id) : undefined,
+    ephemeralRemote: Number(r.ephemeral_remote ?? 0) === 1,
     subagentOverrides: JSON.parse(String(r.subagent_overrides_json || "{}")) as Record<
       string,
       SubagentTaskOverride
@@ -454,8 +479,12 @@ function rowToThread(r: Record<string, unknown>): ThreadRecord {
     usage: {
       mainInputTokens: usageParsed.mainInputTokens ?? 0,
       mainOutputTokens: usageParsed.mainOutputTokens ?? 0,
+      mainCachedInputTokens: usageParsed.mainCachedInputTokens ?? 0,
+      mainReasoningTokens: usageParsed.mainReasoningTokens ?? 0,
       offloadedInputTokens: usageParsed.offloadedInputTokens ?? 0,
       offloadedOutputTokens: usageParsed.offloadedOutputTokens ?? 0,
+      ...(usageParsed.totalCostUsd !== undefined ? { totalCostUsd: usageParsed.totalCostUsd } : {}),
+      exact: Boolean(usageParsed.exact),
     },
     status: String(r.status) as ThreadRecord["status"],
     createdAt: String(r.created_at),

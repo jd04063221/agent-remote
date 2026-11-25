@@ -75,6 +75,8 @@ export const AgentRemoteConfigSchema = z.object({
       bind: z.string().default("127.0.0.1:3775"),
       expose_over_tailscale: z.boolean().default(false),
       default_profile: z.string().optional(),
+      db_path: z.string().optional(),
+      ephemeral_remote: z.boolean().default(false),
     })
     .default({}),
   hosts: z.record(z.string(), HostEntrySchema).default({}),
@@ -162,6 +164,7 @@ export const STARTER_CONFIG_TOML = `[hub]
 bind = "127.0.0.1:3775"
 expose_over_tailscale = false
 default_profile = "us-agy"
+ephemeral_remote = false
 
 [hosts.us-vps]
 name = "US Tailnet VPS"
