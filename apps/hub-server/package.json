@@ -23,6 +23,11 @@
     "@agent-remote/transport": "workspace:*",
     "@agent-remote/driver-antigravity": "workspace:*",
     "@agent-remote/driver-opencode": "workspace:*",
+    "@agent-remote/driver-claude": "workspace:*",
+    "@agent-remote/driver-codex": "workspace:*",
+    "@agent-remote/driver-gemini": "workspace:*",
+    "@agent-remote/driver-kiro": "workspace:*",
+    "@agent-remote/driver-factory-droid": "workspace:*",
     "@agent-remote/subagent-orchestrator": "workspace:*",
     "ws": "^8.18.1"
   },

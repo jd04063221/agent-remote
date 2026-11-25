@@ -41,6 +41,21 @@ importers:
       '@agent-remote/driver-antigravity':
         specifier: workspace:*
         version: link:../../packages/drivers/antigravity
+      '@agent-remote/driver-claude':
+        specifier: workspace:*
+        version: link:../../packages/drivers/claude
+      '@agent-remote/driver-codex':
+        specifier: workspace:*
+        version: link:../../packages/drivers/codex
+      '@agent-remote/driver-factory-droid':
+        specifier: workspace:*
+        version: link:../../packages/drivers/factory-droid
+      '@agent-remote/driver-gemini':
+        specifier: workspace:*
+        version: link:../../packages/drivers/gemini
+      '@agent-remote/driver-kiro':
+        specifier: workspace:*
+        version: link:../../packages/drivers/kiro
       '@agent-remote/driver-opencode':
         specifier: workspace:*
         version: link:../../packages/drivers/opencode

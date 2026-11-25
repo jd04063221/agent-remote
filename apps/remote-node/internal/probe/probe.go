@@ -74,6 +74,16 @@ func DiscoverCatalog(ctx context.Context, req protocol.CatalogReqPayload) protoc
 			bin = "opencode"
 		}
 		args = []string{"models"}
+	case "factory-droid":
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			if data, err := os.ReadFile(home + "/.factory/settings.json"); err == nil {
+				res.RawOutput = string(data)
+				return res
+			}
+		}
+		res.RawOutput = "{}"
+		return res
 	default:
 		res.Error = "CLI catalog probe not implemented for agent " + req.Agent + " (use live session RPC discovery)"
 		return res

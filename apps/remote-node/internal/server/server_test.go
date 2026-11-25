@@ -76,7 +76,7 @@ func TestWSSAuthProbeSpawnMcpAndReconnectReplay(t *testing.T) {
 			Command:         "cat",
 			EnableMcpBridge: true,
 			EphemeralFiles: map[string]string{
-				"config/test.json": `{"ok":true}`,
+				"config/test.json": `{"url":"{{MCP_URL}}","token":"{{MCP_TOKEN}}"}`,
 			},
 		}),
 	}); err != nil {

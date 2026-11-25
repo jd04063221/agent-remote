@@ -49,8 +49,19 @@ export function App() {
   const [subagentOverrides, setSubagentOverrides] = useState<Record<string, SubagentOverride>>({});
   const [showSubagentDrawer, setShowSubagentDrawer] = useState(false);
 
-  // Modals
-  const [modal, setModal] = useState<null | "host" | "profile" | "thread">(null);
+  // Modals & Split Compare
+  const [modal, setModal] = useState<null | "host" | "profile" | "thread" | "blueprint">(null);
+  const [compareThreadId, setCompareThreadId] = useState<string | null>(null);
+  const [blueprintDraft, setBlueprintDraft] = useState({
+    name: "reviewer",
+    description: "Focused code review subagent",
+    systemPrompt: "Review changes concisely and flag security or concurrency issues.",
+    toolsText: "read_file, grep, glob, list_dir",
+    executionMode: "auto" as "auto" | "native" | "federated",
+    defaultProfileId: "",
+    defaultModel: "",
+    defaultEffort: "high" as ThinkingEffort,
+  });
   const [toast, setToast] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
 
@@ -142,7 +153,7 @@ export function App() {
     return () => ws.close();
   }, []);
 
-  // Load events & diff when active thread changes
+  // Load events & diff when active or compare thread changes
   useEffect(() => {
     if (!activeThreadId) return;
     void api<{ events: ThreadEvent[] }>(`/api/threads/${activeThreadId}`).then((d) => {
@@ -150,6 +161,13 @@ export function App() {
     });
     void refreshDiff(activeThreadId);
   }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!compareThreadId) return;
+    void api<{ events: ThreadEvent[] }>(`/api/threads/${compareThreadId}`).then((d) => {
+      setEventsByThread((prev) => ({ ...prev, [compareThreadId]: d.events }));
+    });
+  }, [compareThreadId]);
 
   const activeThread = useMemo(
     () => state.threads.find((t) => t.id === activeThreadId) ?? null,
@@ -389,9 +407,44 @@ export function App() {
         <section className="side-section">
           <div className="section-head">
             <span>SUBAGENT BLUEPRINTS ({state.blueprints.length})</span>
+            <button
+              className="btn ghost xs"
+              onClick={() => {
+                setBlueprintDraft({
+                  name: "",
+                  description: "",
+                  systemPrompt: "",
+                  toolsText: "read_file, grep, glob, list_dir",
+                  executionMode: "auto",
+                  defaultProfileId: "",
+                  defaultModel: "",
+                  defaultEffort: "medium",
+                });
+                setModal("blueprint");
+              }}
+            >
+              + Add
+            </button>
           </div>
           {state.blueprints.map((bp) => (
-            <div key={bp.name} className="bp-row">
+            <div
+              key={bp.name}
+              className="bp-row clickable"
+              title="Click to edit subagent blueprint"
+              onClick={() => {
+                setBlueprintDraft({
+                  name: bp.name,
+                  description: bp.description,
+                  systemPrompt: bp.systemPrompt,
+                  toolsText: bp.tools.join(", "),
+                  executionMode: bp.executionMode,
+                  defaultProfileId: bp.defaultProfileId ?? "",
+                  defaultModel: bp.defaultModel ?? "",
+                  defaultEffort: bp.defaultEffort ?? "medium",
+                });
+                setModal("blueprint");
+              }}
+            >
               <strong>{bp.name}</strong>
               <span className="muted-sm">
                 {bp.defaultModel ?? "inherit"} · {bp.defaultEffort ?? "auto"}
@@ -427,11 +480,28 @@ export function App() {
                 </span>
               </div>
               <div className="header-badges">
+                {state.threads.length > 1 && (
+                  <select
+                    value={compareThreadId ?? ""}
+                    onChange={(e) => setCompareThreadId(e.target.value || null)}
+                    title="Split-pane compare with another thread"
+                  >
+                    <option value="">Single Pane</option>
+                    {state.threads
+                      .filter((t) => t.id !== activeThread.id)
+                      .map((t) => (
+                        <option key={t.id} value={t.id}>
+                          Split: {t.title} ({t.profileId}@{t.hostId})
+                        </option>
+                      ))}
+                  </select>
+                )}
                 {activeCatalog?.tierName && <span className="badge">{activeCatalog.tierName}</span>}
                 <span className="badge green">Offloaded: {offloadPct}%</span>
               </div>
             </header>
 
+            <div className={compareThreadId ? "split-feed-grid" : "single-feed-wrap"}>
             <div className="feed">
               {renderedFeed.map((b) => {
                 if (b.kind === "user_message") {
@@ -520,6 +590,35 @@ export function App() {
                 </div>
               ))}
               <div ref={chatEndRef} />
+            </div>
+
+            {compareThreadId && (() => {
+              const cmpThread = state.threads.find((t) => t.id === compareThreadId);
+              const cmpEvents = eventsByThread[compareThreadId] ?? [];
+              const cmpBlocks: Array<{ id: number; kind: string; text: string }> = [];
+              for (const ev of cmpEvents) {
+                const last = cmpBlocks[cmpBlocks.length - 1];
+                if ((ev.kind === "text_delta" || ev.kind === "thought_delta") && last && last.kind === ev.kind) {
+                  last.text += String(ev.payload.text ?? "");
+                } else if (ev.kind === "user_message" || ev.kind === "text_delta" || ev.kind === "thought_delta") {
+                  cmpBlocks.push({ id: ev.id, kind: ev.kind, text: String(ev.payload.text ?? "") });
+                }
+              }
+              return (
+                <div className="feed compare-pane">
+                  <div className="section-head">
+                    <span>COMPARE: {cmpThread?.title} ({cmpThread?.profileId}@{cmpThread?.hostId})</span>
+                    <button className="btn ghost xs" onClick={() => setCompareThreadId(null)}>×</button>
+                  </div>
+                  {cmpBlocks.map((cb) => (
+                    <div key={cb.id} className={`msg ${cb.kind === "user_message" ? "user" : "assistant"}`}>
+                      <div className="msg-label">{cb.kind === "user_message" ? "You" : cmpThread?.profileId}</div>
+                      <pre className="msg-text">{cb.text}</pre>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             </div>
 
             {/* Per-Task Subagent Override Drawer */}
@@ -908,6 +1007,98 @@ export function App() {
                 }}
               >
                 Create Thread
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modal === "blueprint" && (
+        <div className="modal-backdrop" onClick={() => setModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Subagent Blueprint</h3>
+            <label>Name<input value={blueprintDraft.name} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, name: e.target.value })} /></label>
+            <label>Description<input value={blueprintDraft.description} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, description: e.target.value })} /></label>
+            <label>
+              Execution Mode
+              <select
+                value={blueprintDraft.executionMode}
+                onChange={(e) =>
+                  setBlueprintDraft({
+                    ...blueprintDraft,
+                    executionMode: e.target.value as "auto" | "native" | "federated",
+                  })
+                }
+              >
+                <option value="auto">Auto (Native or Federated)</option>
+                <option value="federated">Federated (Cross-Agent / Quota-Saver)</option>
+                <option value="native">Native Only</option>
+              </select>
+            </label>
+            <label>
+              Default Remote Profile
+              <select
+                value={blueprintDraft.defaultProfileId}
+                onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultProfileId: e.target.value })}
+              >
+                <option value="">Inherit Main Profile</option>
+                {state.profiles.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name} ({p.agent}@{p.hostId})</option>
+                ))}
+              </select>
+            </label>
+            <label>Default Model (e.g. deepseek/deepseek-4.1-flash)<input value={blueprintDraft.defaultModel} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultModel: e.target.value })} /></label>
+            <label>
+              Default Thinking Effort
+              <select
+                value={blueprintDraft.defaultEffort}
+                onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultEffort: e.target.value as ThinkingEffort })}
+              >
+                {ALL_EFFORTS.map((ef) => (
+                  <option key={ef} value={ef}>{ef}</option>
+                ))}
+              </select>
+            </label>
+            <label>Tools (comma-separated)<input value={blueprintDraft.toolsText} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, toolsText: e.target.value })} /></label>
+            <label>System Prompt<textarea rows={3} value={blueprintDraft.systemPrompt} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, systemPrompt: e.target.value })} /></label>
+            <div className="modal-actions">
+              {blueprintDraft.name && state.blueprints.some((b) => b.name === blueprintDraft.name) && (
+                <button
+                  className="btn danger"
+                  onClick={async () => {
+                    await api(`/api/subagents/${encodeURIComponent(blueprintDraft.name)}`, { method: "DELETE" });
+                    setModal(null);
+                    notify(`Deleted subagent ${blueprintDraft.name}`);
+                  }}
+                >
+                  Delete
+                </button>
+              )}
+              <button className="btn" onClick={() => setModal(null)}>Cancel</button>
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  if (!blueprintDraft.name.trim()) return notify("Subagent name is required");
+                  const prof = state.profiles.find((p) => p.id === blueprintDraft.defaultProfileId);
+                  await api("/api/subagents", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      name: blueprintDraft.name.trim(),
+                      description: blueprintDraft.description.trim() || "Custom subagent",
+                      systemPrompt: blueprintDraft.systemPrompt,
+                      tools: blueprintDraft.toolsText.split(",").map((s) => s.trim()).filter(Boolean),
+                      executionMode: blueprintDraft.executionMode,
+                      defaultHostId: prof?.hostId,
+                      defaultProfileId: prof?.id,
+                      defaultModel: blueprintDraft.defaultModel.trim() || undefined,
+                      defaultEffort: blueprintDraft.defaultEffort,
+                    }),
+                  });
+                  setModal(null);
+                  notify(`Saved subagent ${blueprintDraft.name}`);
+                }}
+              >
+                Save Blueprint
               </button>
             </div>
           </div>

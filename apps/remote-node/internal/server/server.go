@@ -305,12 +305,6 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 		return
 	}
 
-	if err := materializeFiles(workdir, req.EphemeralFiles); err != nil {
-		_ = os.RemoveAll(workdir)
-		sendErr(conn, 0, reqID, "ephemeral_files_failed", err.Error())
-		return
-	}
-
 	sessCtx, cancel := context.WithCancel(context.Background())
 	sess := &managedSession{
 		id:         req.SessionID,
@@ -344,7 +338,19 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 		sess.mcpBridge = bridge
 	}
 
-	cmd := exec.CommandContext(sessCtx, req.Command, req.Args...)
+	replacer := buildMcpReplacer(sess.mcpBridge)
+	if err := materializeFiles(workdir, req.EphemeralFiles, replacer); err != nil {
+		sess.cleanup()
+		sendErr(conn, 0, reqID, "ephemeral_files_failed", err.Error())
+		return
+	}
+
+	expandedArgs := make([]string, len(req.Args))
+	for i, a := range req.Args {
+		expandedArgs[i] = replacer.Replace(a)
+	}
+
+	cmd := exec.CommandContext(sessCtx, req.Command, expandedArgs...)
 	cmd.Dir = emptyDir
 	env := append([]string{}, os.Environ()...)
 	env = append(env, "AGENT_REMOTE_SESSION_ID="+req.SessionID)
@@ -507,7 +513,17 @@ func (s *Server) removeSession(sess *managedSession) {
 	delete(s.byCh, sess.channel)
 }
 
-func materializeFiles(baseDir string, files map[string]string) error {
+func buildMcpReplacer(bridge *mcpbridge.Bridge) *strings.Replacer {
+	if bridge == nil {
+		return strings.NewReplacer()
+	}
+	return strings.NewReplacer(
+		"{{MCP_URL}}", bridge.EndpointURL(),
+		"{{MCP_TOKEN}}", bridge.BearerToken(),
+	)
+}
+
+func materializeFiles(baseDir string, files map[string]string, replacer *strings.Replacer) error {
 	cleanBase := filepath.Clean(baseDir)
 	for rel, content := range files {
 		cleanRel := filepath.Clean(rel)
@@ -521,7 +537,11 @@ func materializeFiles(baseDir string, files map[string]string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+		expanded := content
+		if replacer != nil {
+			expanded = replacer.Replace(content)
+		}
+		if err := os.WriteFile(target, []byte(expanded), 0o600); err != nil {
 			return err
 		}
 	}

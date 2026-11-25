@@ -95,7 +95,13 @@ html, body, #root {
   border-top: 1px dashed var(--border);
   margin-top: 4px;
 }
-.bp-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+.bp-row { display: flex; justify-content: space-between; padding: 5px 6px; font-size: 12px; border-radius: 5px; }
+.bp-row.clickable { cursor: pointer; }
+.bp-row.clickable:hover { background: var(--panel-2); }
+
+.single-feed-wrap { flex: 1; display: flex; overflow: hidden; }
+.split-feed-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+.compare-pane { border-left: 1px solid var(--border); background: #0e131b; }
 
 .canvas { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .canvas-header {

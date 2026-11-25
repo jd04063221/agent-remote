@@ -5,11 +5,10 @@ import path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { buildQuotaSaverGuidance } from "@agent-remote/core";
-import {
-  AcpRemoteSession,
-  buildAntigravitySpawnSpec,
-} from "@agent-remote/driver-antigravity";
-import { buildOpenCodeSpawnSpec } from "@agent-remote/driver-opencode";
+import { AcpRemoteSession } from "@agent-remote/driver-antigravity";
+import { getClaudeFallbackModels } from "@agent-remote/driver-claude";
+import { parseFactoryCustomModelsJson } from "@agent-remote/driver-factory-droid";
+import { parseKiroModelsOutput } from "@agent-remote/driver-kiro";
 import {
   parseAgyModelsOutput,
   type CatalogSnapshot,
@@ -41,6 +40,11 @@ import {
 } from "@agent-remote/transport";
 
 import {
+  attachDriverSession,
+  buildSpawnSpecForAgent,
+  type UnifiedDriverSession,
+} from "./driver-factory.js";
+import {
   HubStore,
   type HostRecord,
   type ProfileRecord,
@@ -52,7 +56,7 @@ interface ActiveRuntime {
   profileId: string;
   hostId: string;
   channel: RemoteSessionChannel;
-  acp: AcpRemoteSession;
+  driver: UnifiedDriverSession;
   engine: LocalToolEngine;
   policy: PolicyEngine;
   abortController: AbortController;
@@ -187,14 +191,23 @@ export class AgentRemoteHub {
     if (host.transport === "tailnet-direct") {
       await this.connectHost(host.id);
       const client = this.clients.get(host.id)!;
-      const raw = await client.discoverCatalogRaw(profile.agent, profile.remoteBin);
-      if (raw.error && !raw.rawOutput) {
-        throw new Error(raw.error);
+
+      let models = [] as CatalogSnapshot["models"];
+      if (profile.agent === "claude") {
+        models = getClaudeFallbackModels();
+      } else {
+        const raw = await client.discoverCatalogRaw(profile.agent, profile.remoteBin);
+        if (profile.agent === "antigravity") {
+          models = parseAgyModelsOutput(raw.rawOutput);
+        } else if (profile.agent === "kiro") {
+          models = parseKiroModelsOutput(raw.rawOutput);
+        } else if (profile.agent === "factory-droid") {
+          models = parseFactoryCustomModelsJson(raw.rawOutput);
+        } else if (raw.rawOutput) {
+          models = parseGenericModelLines(raw.rawOutput);
+        }
       }
-      const models =
-        profile.agent === "antigravity"
-          ? parseAgyModelsOutput(raw.rawOutput)
-          : parseGenericModelLines(raw.rawOutput);
+
       const snapshot: CatalogSnapshot = {
         hostId: host.id,
         profileId: profile.id,
@@ -347,16 +360,17 @@ export class AgentRemoteHub {
     const rt = this.runtimes.get(threadId);
     if (!rt) return;
     rt.abortController.abort();
-    rt.acp.cancel();
+    rt.driver.cancel();
   }
 
   private async runPromptTurn(thread: ThreadRecord, prompt: string): Promise<void> {
     try {
       const rt = await this.ensureRuntime(thread);
       rt.policy.setMode((thread.mode as PermissionMode) || "default");
-      await rt.acp.setModelAndEffort(thread.model, thread.effort);
-
-      await rt.acp.prompt(prompt);
+      await rt.driver.prompt(prompt, {
+        model: thread.model,
+        effort: thread.effort,
+      });
 
       // Lightweight token estimate update for primary turn visibility
       thread.usage.mainInputTokens += Math.ceil(prompt.length / 4);
@@ -454,27 +468,21 @@ export class AgentRemoteHub {
     const mcpHandler = new McpJsonRpcHandler(engine);
     const sessionId = `${thread.id}-${crypto.randomBytes(3).toString("hex")}`;
 
-    let channel: RemoteSessionChannel;
-    let systemPromptAppend: string | undefined;
+    const built = buildSpawnSpecForAgent({
+      sessionId,
+      hostId: host.id,
+      profileId: profile.id,
+      agent: profile.agent,
+      remoteBin: profile.remoteBin,
+      localWorkspaceRoot: thread.worktreePath,
+      localGitBranch: thread.branch,
+      model: thread.model ?? profile.defaultModel,
+      effort: thread.effort ?? profile.defaultEffort,
+      quotaSaverPrompt: quotaPrompt,
+      nativePlans: plans,
+    });
 
-    if (profile.agent === "opencode") {
-      const spawnSpec = buildOpenCodeSpawnSpec({
-        sessionId,
-        remoteBin: profile.remoteBin,
-        model: thread.model ?? profile.defaultModel,
-      });
-      channel = await this.spawnOnHost(host, spawnSpec);
-    } else {
-      const built = buildAntigravitySpawnSpec({
-        sessionId,
-        remoteBin: profile.remoteBin,
-        localWorkspaceRoot: thread.worktreePath,
-        localGitBranch: thread.branch,
-        quotaSaverPrompt: quotaPrompt,
-      });
-      systemPromptAppend = built.systemPromptAppend;
-      channel = await this.spawnOnHost(host, built.spawn);
-    }
+    const channel = await this.spawnOnHost(host, built.spawn);
 
     channel.setMcpHandler((req) =>
       mcpHandler.handleRpc(req, {
@@ -489,14 +497,20 @@ export class AgentRemoteHub {
       }),
     );
 
-    const acp = new AcpRemoteSession({
+    const driver = await attachDriverSession({
+      agent: profile.agent,
+      hostId: host.id,
+      profileId: profile.id,
+      sessionId,
       channel,
       toolEngine: engine,
-      sessionId,
-      blockRemoteBuiltins: true,
+      model: thread.model ?? profile.defaultModel,
+      effort: thread.effort ?? profile.defaultEffort,
+      systemPromptAppend: built.systemPromptAppend,
+      developerInstructions: built.developerInstructions,
     });
 
-    acp.on("event", (ev: { type: string; text?: string }) => {
+    driver.onEvent((ev) => {
       if (ev.type === "text_delta" && ev.text) {
         thread.usage.mainOutputTokens += Math.ceil(ev.text.length / 4);
       }
@@ -504,16 +518,10 @@ export class AgentRemoteHub {
       this.broadcast({ type: "thread_event", payload: stored });
     });
 
-    await acp.initialize();
-    const sessionNewRes = await acp.startSession({ systemPromptAppend });
-
-    // Opportunistically refresh live model catalog from session/new response
-    if (profile.agent === "antigravity" || profile.agent === "opencode") {
-      const snapshot = acp.extractCatalogSnapshot(host.id, profile.id, profile.agent, sessionNewRes);
-      if (snapshot.models.length > 0) {
-        this.store.upsertCatalog(snapshot);
-        this.broadcast({ type: "catalog_updated", payload: snapshot });
-      }
+    const initialCatalog = driver.getInitialCatalog?.();
+    if (initialCatalog && initialCatalog.models.length > 0) {
+      this.store.upsertCatalog(initialCatalog);
+      this.broadcast({ type: "catalog_updated", payload: initialCatalog });
     }
 
     const rt: ActiveRuntime = {
@@ -521,7 +529,7 @@ export class AgentRemoteHub {
       profileId: profile.id,
       hostId: host.id,
       channel,
-      acp,
+      driver,
       engine,
       policy,
       abortController,
@@ -565,49 +573,48 @@ export class AgentRemoteHub {
     });
     const childMcp = new McpJsonRpcHandler(childEngine);
 
-    const channel =
-      profile.agent === "opencode"
-        ? await this.spawnOnHost(
-            host,
-            buildOpenCodeSpawnSpec({
-              sessionId: childId,
-              remoteBin: profile.remoteBin,
-              model: call.model ?? profile.defaultModel,
-              pureInferenceOnly: call.pureInferenceOnly,
-            }),
-          )
-        : await this.spawnOnHost(
-            host,
-            buildAntigravitySpawnSpec({
-              sessionId: childId,
-              remoteBin: profile.remoteBin,
-              localWorkspaceRoot: parentThread.worktreePath,
-              localGitBranch: parentThread.branch,
-              enableMcpBridge: !call.pureInferenceOnly,
-            }).spawn,
-          );
+    const built = buildSpawnSpecForAgent({
+      sessionId: childId,
+      hostId: host.id,
+      profileId: profile.id,
+      agent: profile.agent,
+      remoteBin: profile.remoteBin,
+      localWorkspaceRoot: parentThread.worktreePath,
+      localGitBranch: parentThread.branch,
+      model: call.model ?? profile.defaultModel,
+      effort: call.effort ?? profile.defaultEffort,
+      pureInferenceOnly: call.pureInferenceOnly,
+      nativePlans: [],
+    });
 
+    const channel = await this.spawnOnHost(host, built.spawn);
     channel.setMcpHandler((req) => childMcp.handleRpc(req, { sessionId: childId }));
 
-    const acp = new AcpRemoteSession({
-      channel,
-      toolEngine: childEngine,
-      sessionId: childId,
-      blockRemoteBuiltins: true,
-    });
-
     let collected = "";
-    acp.on("event", (ev: { type: string; text?: string }) => {
-      if (ev.type === "text_delta" && ev.text) {
-        collected += ev.text;
-      }
-    });
-
     try {
-      await acp.initialize();
-      await acp.startSession();
-      await acp.setModelAndEffort(call.model ?? profile.defaultModel, call.effort);
-      await acp.prompt(call.task);
+      const driver = await attachDriverSession({
+        agent: profile.agent,
+        hostId: host.id,
+        profileId: profile.id,
+        sessionId: childId,
+        channel,
+        toolEngine: childEngine,
+        model: call.model ?? profile.defaultModel,
+        effort: call.effort ?? profile.defaultEffort,
+        systemPromptAppend: built.systemPromptAppend,
+        developerInstructions: built.developerInstructions,
+      });
+
+      driver.onEvent((ev) => {
+        if (ev.type === "text_delta" && ev.text) {
+          collected += ev.text;
+        }
+      });
+
+      await driver.prompt(call.task, {
+        model: call.model ?? profile.defaultModel,
+        effort: call.effort ?? profile.defaultEffort,
+      });
 
       const inTok = Math.ceil(call.task.length / 4);
       const outTok = Math.ceil(collected.length / 4);
@@ -620,9 +627,17 @@ export class AgentRemoteHub {
         preview: collected.slice(0, 400),
       });
       this.broadcast({ type: "thread_event", payload: doneEv });
-      return { ok: true, output: collected || "(completed with empty response)", inputTokens: inTok, outputTokens: outTok };
+      return {
+        ok: true,
+        output: collected || "(completed with empty response)",
+        inputTokens: inTok,
+        outputTokens: outTok,
+      };
     } catch (err) {
-      return { ok: false, output: `Subagent "${call.subagentName}" failed: ${(err as Error).message}` };
+      return {
+        ok: false,
+        output: `Subagent "${call.subagentName}" failed: ${(err as Error).message}`,
+      };
     } finally {
       channel.kill();
     }
