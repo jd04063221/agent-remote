@@ -67,16 +67,16 @@ export interface ThreadEventRecord {
   createdAt: string;
 }
 
+const LEGACY_SEED_MODEL = "deepseek/deepseek-4.1-flash";
+
 const DEFAULT_BLUEPRINTS: SubagentBlueprint[] = [
   {
     name: "explorer",
-    description: "Fast codebase scan and concise context summary (quota-saver offload target)",
+    description: "Fast codebase scan and concise context summary",
     systemPrompt:
       "Locate relevant files, symbols, and call chains quickly. Return a crisp structured summary instead of raw file dumps.",
     tools: ["read_file", "grep", "glob", "list_dir"],
-    executionMode: "federated",
-    defaultModel: "deepseek/deepseek-4.1-flash",
-    defaultEffort: "low",
+    executionMode: "auto",
   },
   {
     name: "implementer",
@@ -85,8 +85,6 @@ const DEFAULT_BLUEPRINTS: SubagentBlueprint[] = [
       "Implement the requested scoped changes cleanly, run local tests, and report a short summary of modified files and test results.",
     tools: ["read_file", "edit_file", "write_file", "run_command", "grep", "glob"],
     executionMode: "auto",
-    defaultModel: "deepseek/deepseek-4.1-flash",
-    defaultEffort: "medium",
   },
   {
     name: "architect",
@@ -95,7 +93,6 @@ const DEFAULT_BLUEPRINTS: SubagentBlueprint[] = [
       "Focus on invariants, concurrency safety, edge cases, and minimal clean designs.",
     tools: ["read_file", "grep", "glob", "list_dir"],
     executionMode: "auto",
-    defaultEffort: "xhigh",
   },
 ];
 
@@ -208,6 +205,25 @@ export class HubStore {
     if (count.c === 0) {
       for (const bp of DEFAULT_BLUEPRINTS) {
         this.upsertBlueprint(bp);
+      }
+      return;
+    }
+
+    // Migrate legacy v0.1.0-v0.1.2 seeded blueprints that hardcoded `deepseek/deepseek-4.1-flash`
+    // without binding a target profile, so they inherit the main host's agent instead of failing.
+    for (const bp of this.listBlueprints()) {
+      if (
+        (bp.name === "explorer" || bp.name === "implementer") &&
+        !bp.defaultProfileId &&
+        bp.defaultModel === LEGACY_SEED_MODEL
+      ) {
+        const cleaned: SubagentBlueprint = {
+          ...bp,
+          defaultModel: undefined,
+          defaultEffort: undefined,
+          executionMode: bp.name === "explorer" && bp.executionMode === "federated" ? "auto" : bp.executionMode,
+        };
+        this.upsertBlueprint(cleaned);
       }
     }
   }

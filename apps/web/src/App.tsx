@@ -7,6 +7,15 @@ import {
   type Locale,
   type MessageKey,
 } from "./i18n";
+import {
+  buildProfileModelOptions,
+  coerceEffortForModel,
+  findCatalogForProfile,
+  findModelInCatalog,
+  resolveEffortCapabilities,
+  type ModelPickerOption,
+} from "./model-utils";
+import { ModelPicker } from "./ModelPicker";
 import type {
   ApprovalRequest,
   CatalogSnapshot,
@@ -19,7 +28,6 @@ import type {
   ThreadEvent,
 } from "./types";
 
-const ALL_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const DEFAULT_BIN_BY_AGENT: Record<string, string> = {
   antigravity: "agy",
   opencode: "opencode",
@@ -75,7 +83,7 @@ export function App() {
   const [promptText, setPromptText] = useState("");
   const [selectedProfileId, setSelectedProfileId] = useState<string>("");
   const [selectedModel, setSelectedModel] = useState<string>("");
-  const [selectedEffort, setSelectedEffort] = useState<ThinkingEffort>("high");
+  const [selectedEffort, setSelectedEffort] = useState<ThinkingEffort | "">("");
   const [selectedMode, setSelectedMode] = useState<string>("default");
   const [quotaSaver, setQuotaSaver] = useState<boolean>(true);
   const [subagentOverrides, setSubagentOverrides] = useState<Record<string, SubagentOverride>>({});
@@ -92,7 +100,7 @@ export function App() {
     executionMode: "auto" as "auto" | "native" | "federated",
     defaultProfileId: "",
     defaultModel: "",
-    defaultEffort: "high" as ThinkingEffort,
+    defaultEffort: "" as ThinkingEffort | "",
   });
   const [toast, setToast] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
@@ -280,7 +288,7 @@ export function App() {
     if (!activeThread) return;
     setSelectedProfileId(activeThread.profileId);
     setSelectedModel(activeThread.model ?? "");
-    setSelectedEffort(activeThread.effort ?? "high");
+    setSelectedEffort(activeThread.effort ?? "");
     setSelectedMode(activeThread.mode || "default");
     setQuotaSaver(activeThread.quotaSaverMode);
     setSubagentOverrides(activeThread.subagentOverrides ?? {});
@@ -291,22 +299,106 @@ export function App() {
     [state.profiles, selectedProfileId, activeThread],
   );
 
-  const activeCatalog = useMemo(() => {
-    if (!activeProfile) return undefined;
-    return state.catalogs.find(
-      (c) => c.hostId === activeProfile.hostId && c.profileId === activeProfile.id,
-    );
-  }, [state.catalogs, activeProfile]);
-
-  const selectedModelMeta = useMemo(
-    () => activeCatalog?.models.find((m) => m.id === selectedModel),
-    [activeCatalog, selectedModel],
+  const primaryProfile = useMemo(
+    () => activeProfile ?? state.profiles[0],
+    [activeProfile, state.profiles],
   );
 
-  const availableEfforts =
-    selectedModelMeta?.capabilities.supportedEfforts.length
-      ? selectedModelMeta.capabilities.supportedEfforts
-      : ALL_EFFORTS;
+  const activeCatalog = useMemo(
+    () => findCatalogForProfile(state.catalogs, activeProfile),
+    [state.catalogs, activeProfile],
+  );
+
+  const mainModelOptions = useMemo(
+    () => buildProfileModelOptions(activeCatalog, activeProfile),
+    [activeCatalog, activeProfile],
+  );
+
+  const mainEffortCaps = useMemo(
+    () => resolveEffortCapabilities(activeCatalog, selectedModel),
+    [activeCatalog, selectedModel],
+  );
+  const availableEfforts = mainEffortCaps.efforts;
+
+  // Keep selectedEffort strictly valid for the active model's live advertised capabilities
+  useEffect(() => {
+    const coerced = coerceEffortForModel(selectedEffort, activeCatalog, selectedModel, false);
+    if (coerced !== selectedEffort) {
+      setSelectedEffort(coerced);
+    }
+  }, [activeCatalog, selectedModel, selectedEffort]);
+
+  // Blueprint modal dynamic model list & capabilities (prioritizes main host agent first)
+  const blueprintTargetProfile = useMemo(() => {
+    if (blueprintDraft.defaultProfileId) {
+      return state.profiles.find((p) => p.id === blueprintDraft.defaultProfileId);
+    }
+    return primaryProfile;
+  }, [blueprintDraft.defaultProfileId, state.profiles, primaryProfile]);
+
+  const blueprintTargetCatalog = useMemo(
+    () => findCatalogForProfile(state.catalogs, blueprintTargetProfile),
+    [state.catalogs, blueprintTargetProfile],
+  );
+
+  const blueprintModelOptions = useMemo<ModelPickerOption[]>(() => {
+    if (blueprintDraft.defaultProfileId) {
+      return buildProfileModelOptions(blueprintTargetCatalog, blueprintTargetProfile);
+    }
+    // When inheriting main profile: show primary host's agent models first, then any other connected agents
+    const orderedProfiles = primaryProfile
+      ? [primaryProfile, ...state.profiles.filter((p) => p.id !== primaryProfile.id)]
+      : state.profiles;
+    const all: ModelPickerOption[] = [];
+    for (const p of orderedProfiles) {
+      const cat = findCatalogForProfile(state.catalogs, p);
+      all.push(...buildProfileModelOptions(cat, p));
+    }
+    return all;
+  }, [
+    blueprintDraft.defaultProfileId,
+    blueprintTargetCatalog,
+    blueprintTargetProfile,
+    primaryProfile,
+    state.profiles,
+    state.catalogs,
+  ]);
+
+  const blueprintEffortCaps = useMemo(() => {
+    if (blueprintTargetCatalog) {
+      const direct = resolveEffortCapabilities(blueprintTargetCatalog, blueprintDraft.defaultModel);
+      if (direct.matchedModel || blueprintDraft.defaultProfileId) {
+        return direct;
+      }
+    }
+    // If user typed a model belonging to another connected catalog, inspect that catalog too
+    if (blueprintDraft.defaultModel) {
+      for (const cat of state.catalogs) {
+        const hit = findModelInCatalog(cat, blueprintDraft.defaultModel);
+        if (hit) {
+          return resolveEffortCapabilities(cat, blueprintDraft.defaultModel);
+        }
+      }
+    }
+    return resolveEffortCapabilities(blueprintTargetCatalog, blueprintDraft.defaultModel);
+  }, [blueprintTargetCatalog, blueprintDraft.defaultModel, blueprintDraft.defaultProfileId, state.catalogs]);
+
+  const profileModalCatalog = useMemo(() => {
+    const target = state.profiles.find(
+      (p) => p.id === (editingProfileId ?? profileDraft.id) && p.hostId === profileDraft.hostId,
+    );
+    return findCatalogForProfile(state.catalogs, target);
+  }, [state.profiles, state.catalogs, editingProfileId, profileDraft.id, profileDraft.hostId]);
+
+  const profileModalModelOptions = useMemo(
+    () => buildProfileModelOptions(profileModalCatalog),
+    [profileModalCatalog],
+  );
+
+  const pickerCountLabel = useCallback(
+    (shown: number, total: number) => t("picker.count", { shown, total }),
+    [t],
+  );
 
   const refreshDiff = async (tid: string) => {
     try {
@@ -331,7 +423,7 @@ export function App() {
           hostId: activeProfile?.hostId ?? activeThread.hostId,
           profileId: activeProfile?.id ?? activeThread.profileId,
           mainModel: selectedModel || undefined,
-          mainEffort: selectedEffort,
+          mainEffort: selectedEffort || undefined,
           mode: selectedMode,
           quotaSaverMode: quotaSaver,
           subagents: subagentOverrides,
@@ -789,7 +881,7 @@ export function App() {
                   executionMode: "auto",
                   defaultProfileId: "",
                   defaultModel: "",
-                  defaultEffort: "medium",
+                  defaultEffort: "",
                 });
                 setModal("blueprint");
               }}
@@ -803,6 +895,16 @@ export function App() {
               className="bp-row clickable"
               title={t("sidebar.editSubagentTooltip")}
               onClick={() => {
+                const targetProf = bp.defaultProfileId
+                  ? state.profiles.find((p) => p.id === bp.defaultProfileId)
+                  : primaryProfile;
+                const targetCat = findCatalogForProfile(state.catalogs, targetProf);
+                const validEffort = coerceEffortForModel(
+                  bp.defaultEffort ?? "",
+                  targetCat,
+                  bp.defaultModel,
+                  true,
+                );
                 setBlueprintDraft({
                   name: bp.name,
                   description: bp.description,
@@ -811,7 +913,7 @@ export function App() {
                   executionMode: bp.executionMode,
                   defaultProfileId: bp.defaultProfileId ?? "",
                   defaultModel: bp.defaultModel ?? "",
-                  defaultEffort: bp.defaultEffort ?? "medium",
+                  defaultEffort: validEffort,
                 });
                 setModal("blueprint");
               }}
@@ -1037,19 +1139,24 @@ export function App() {
                     enabled: true,
                     profileId: bp.defaultProfileId ?? "",
                     model: bp.defaultModel ?? "",
-                    effort: bp.defaultEffort ?? "medium",
+                    effort: bp.defaultEffort,
                   };
                   const update = (patch: Partial<SubagentOverride>) =>
                     setSubagentOverrides((prev) => ({
                       ...prev,
                       [bp.name]: { ...ov, ...patch },
                     }));
-                  const targetProf = state.profiles.find((p) => p.id === ov.profileId);
-                  const targetCat = targetProf
-                    ? state.catalogs.find(
-                        (c) => c.hostId === targetProf.hostId && c.profileId === targetProf.id,
-                      )
-                    : undefined;
+                  const effectiveProf = ov.profileId
+                    ? state.profiles.find((p) => p.id === ov.profileId)
+                    : activeProfile;
+                  const effectiveCat = findCatalogForProfile(state.catalogs, effectiveProf);
+                  const rowOptions = buildProfileModelOptions(effectiveCat, effectiveProf);
+                  const effectiveModelId =
+                    ov.model || (!ov.profileId ? selectedModel : undefined) || undefined;
+                  const rowEffortCaps = resolveEffortCapabilities(effectiveCat, effectiveModelId);
+                  const currentEffortValue =
+                    ov.effort && rowEffortCaps.efforts.includes(ov.effort) ? ov.effort : "";
+
                   return (
                     <div key={bp.name} className="subagent-override-row">
                       <label className="check">
@@ -1063,8 +1170,27 @@ export function App() {
                       <select
                         value={ov.profileId ?? ""}
                         onChange={(e) => {
-                          const p = state.profiles.find((x) => x.id === e.target.value);
-                          update({ profileId: e.target.value || undefined, hostId: p?.hostId });
+                          const nextProfId = e.target.value;
+                          const nextProf = nextProfId
+                            ? state.profiles.find((x) => x.id === nextProfId)
+                            : activeProfile;
+                          const nextCat = findCatalogForProfile(state.catalogs, nextProf);
+                          const keepModel =
+                            ov.model && nextCat && findModelInCatalog(nextCat, ov.model)
+                              ? ov.model
+                              : undefined;
+                          const nextEffort = coerceEffortForModel(
+                            ov.effort ?? "",
+                            nextCat,
+                            keepModel,
+                            true,
+                          );
+                          update({
+                            profileId: nextProfId || undefined,
+                            hostId: nextProfId ? nextProf?.hostId : undefined,
+                            model: keepModel,
+                            effort: nextEffort || undefined,
+                          });
                         }}
                       >
                         <option value="">{t("drawer.sameAsMain")}</option>
@@ -1074,22 +1200,42 @@ export function App() {
                           </option>
                         ))}
                       </select>
-                      <input
-                        list={`models-${bp.name}`}
-                        placeholder={t("drawer.modelPlaceholder")}
+                      <ModelPicker
+                        dropUp
                         value={ov.model ?? ""}
-                        onChange={(e) => update({ model: e.target.value || undefined })}
+                        options={rowOptions}
+                        placeholder={t("drawer.modelPlaceholder")}
+                        autoLabel={t("picker.autoInherit")}
+                        emptyLabel={t("picker.noMatch")}
+                        countLabel={pickerCountLabel}
+                        onChange={(nextModel) => {
+                          const nextEffort = coerceEffortForModel(
+                            ov.effort ?? "",
+                            effectiveCat,
+                            nextModel || (!ov.profileId ? selectedModel : undefined),
+                            true,
+                          );
+                          update({
+                            model: nextModel || undefined,
+                            effort: nextEffort || undefined,
+                          });
+                        }}
                       />
-                      <datalist id={`models-${bp.name}`}>
-                        {(targetCat ?? activeCatalog)?.models.map((m) => (
-                          <option key={m.id} value={m.id}>{m.displayName}</option>
-                        ))}
-                      </datalist>
                       <select
-                        value={ov.effort ?? "medium"}
-                        onChange={(e) => update({ effort: e.target.value as ThinkingEffort })}
+                        value={currentEffortValue}
+                        disabled={rowEffortCaps.efforts.length === 0}
+                        onChange={(e) =>
+                          update({
+                            effort: (e.target.value as ThinkingEffort) || undefined,
+                          })
+                        }
                       >
-                        {ALL_EFFORTS.map((ef) => (
+                        <option value="">
+                          {rowEffortCaps.efforts.length === 0
+                            ? t("picker.effortModelDefault")
+                            : t("picker.effortInherit")}
+                        </option>
+                        {rowEffortCaps.efforts.map((ef) => (
                           <option key={ef} value={ef}>{ef}</option>
                         ))}
                       </select>
@@ -1116,7 +1262,20 @@ export function App() {
               <div className="composer-controls">
                 <select
                   value={selectedProfileId}
-                  onChange={(e) => setSelectedProfileId(e.target.value)}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    const nextProf = state.profiles.find((p) => p.id === nextId);
+                    const nextCat = findCatalogForProfile(state.catalogs, nextProf);
+                    setSelectedProfileId(nextId);
+                    const keepModel =
+                      selectedModel && nextCat && findModelInCatalog(nextCat, selectedModel)
+                        ? selectedModel
+                        : "";
+                    setSelectedModel(keepModel);
+                    setSelectedEffort(
+                      coerceEffortForModel(selectedEffort, nextCat, keepModel, false),
+                    );
+                  }}
                   title={t("composer.profileTooltip")}
                 >
                   {state.profiles.map((p) => (
@@ -1126,33 +1285,42 @@ export function App() {
                   ))}
                 </select>
 
-                <input
-                  list="main-model-list"
-                  className="model-input"
+                <ModelPicker
+                  dropUp
+                  className="composer-model-picker"
+                  value={selectedModel}
+                  options={mainModelOptions}
                   placeholder={
                     activeCatalog
                       ? t("composer.modelLive", { count: activeCatalog.models.length })
                       : t("composer.modelAuto")
                   }
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  autoLabel={t("picker.autoInherit")}
+                  emptyLabel={t("picker.noMatch")}
+                  countLabel={pickerCountLabel}
+                  onChange={(nextModel) => {
+                    setSelectedModel(nextModel);
+                    setSelectedEffort(
+                      coerceEffortForModel(selectedEffort, activeCatalog, nextModel, false),
+                    );
+                  }}
                 />
-                <datalist id="main-model-list">
-                  {activeCatalog?.models.map((m) => (
-                    <option key={m.id} value={m.id}>{m.displayName}</option>
-                  ))}
-                </datalist>
 
                 <select
-                  value={selectedEffort}
-                  onChange={(e) => setSelectedEffort(e.target.value as ThinkingEffort)}
+                  value={availableEfforts.includes(selectedEffort as ThinkingEffort) ? selectedEffort : ""}
+                  disabled={availableEfforts.length === 0}
+                  onChange={(e) => setSelectedEffort((e.target.value as ThinkingEffort) || "")}
                   title={t("composer.effortTooltip")}
                 >
-                  {availableEfforts.map((ef) => (
-                    <option key={ef} value={ef}>
-                      {t("composer.effortLabel", { level: ef })}
-                    </option>
-                  ))}
+                  {availableEfforts.length === 0 ? (
+                    <option value="">{t("picker.effortAuto")}</option>
+                  ) : (
+                    availableEfforts.map((ef) => (
+                      <option key={ef} value={ef}>
+                        {t("composer.effortLabel", { level: ef })}
+                      </option>
+                    ))
+                  )}
                 </select>
 
                 <select value={selectedMode} onChange={(e) => setSelectedMode(e.target.value)}>
@@ -1569,7 +1737,21 @@ export function App() {
             </label>
             <label>
               {t("modal.profile.defaultModel")}
-              <input value={profileDraft.defaultModel} onChange={(e) => setProfileDraft({ ...profileDraft, defaultModel: e.target.value })} />
+              <ModelPicker
+                value={profileDraft.defaultModel}
+                options={profileModalModelOptions}
+                placeholder={
+                  profileModalCatalog
+                    ? t("composer.modelLive", { count: profileModalCatalog.models.length })
+                    : t("composer.modelAuto")
+                }
+                autoLabel={t("picker.autoInherit")}
+                emptyLabel={t("picker.noMatch")}
+                countLabel={pickerCountLabel}
+                onChange={(nextModel) =>
+                  setProfileDraft({ ...profileDraft, defaultModel: nextModel })
+                }
+              />
             </label>
             <div className="modal-actions">
               {editingProfileId && (() => {
@@ -1725,7 +1907,31 @@ export function App() {
               {t("modal.blueprint.profile")}
               <select
                 value={blueprintDraft.defaultProfileId}
-                onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultProfileId: e.target.value })}
+                onChange={(e) => {
+                  const nextProfId = e.target.value;
+                  const nextProf = nextProfId
+                    ? state.profiles.find((p) => p.id === nextProfId)
+                    : primaryProfile;
+                  const nextCat = findCatalogForProfile(state.catalogs, nextProf);
+                  const keepModel =
+                    blueprintDraft.defaultModel &&
+                    nextCat &&
+                    findModelInCatalog(nextCat, blueprintDraft.defaultModel)
+                      ? blueprintDraft.defaultModel
+                      : "";
+                  const nextEffort = coerceEffortForModel(
+                    blueprintDraft.defaultEffort,
+                    nextCat,
+                    keepModel,
+                    true,
+                  );
+                  setBlueprintDraft({
+                    ...blueprintDraft,
+                    defaultProfileId: nextProfId,
+                    defaultModel: keepModel,
+                    defaultEffort: nextEffort,
+                  });
+                }}
               >
                 <option value="">{t("modal.blueprint.inheritMain")}</option>
                 {state.profiles.map((p) => (
@@ -1735,15 +1941,64 @@ export function App() {
             </label>
             <label>
               {t("modal.blueprint.model")}
-              <input value={blueprintDraft.defaultModel} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultModel: e.target.value })} />
+              <ModelPicker
+                value={blueprintDraft.defaultModel}
+                options={blueprintModelOptions}
+                placeholder={t("drawer.modelPlaceholder")}
+                autoLabel={t("picker.autoInherit")}
+                emptyLabel={t("picker.noMatch")}
+                countLabel={pickerCountLabel}
+                onChange={(nextModel, matchedOpt) => {
+                  // If user picked a model belonging to another connected agent while on "Inherit Main",
+                  // automatically bind defaultProfileId to that model's owning agent so host/model stay aligned.
+                  const nextProfId =
+                    matchedOpt?.profileId &&
+                    !blueprintDraft.defaultProfileId &&
+                    matchedOpt.profileId !== primaryProfile?.id
+                      ? matchedOpt.profileId
+                      : blueprintDraft.defaultProfileId;
+                  const nextProf = nextProfId
+                    ? state.profiles.find((p) => p.id === nextProfId)
+                    : primaryProfile;
+                  const nextCat = findCatalogForProfile(state.catalogs, nextProf);
+                  const nextEffort = coerceEffortForModel(
+                    blueprintDraft.defaultEffort,
+                    nextCat,
+                    nextModel,
+                    true,
+                  );
+                  setBlueprintDraft({
+                    ...blueprintDraft,
+                    defaultProfileId: nextProfId,
+                    defaultModel: nextModel,
+                    defaultEffort: nextEffort,
+                  });
+                }}
+              />
             </label>
             <label>
               {t("modal.blueprint.effort")}
               <select
-                value={blueprintDraft.defaultEffort}
-                onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultEffort: e.target.value as ThinkingEffort })}
+                value={
+                  blueprintDraft.defaultEffort &&
+                  blueprintEffortCaps.efforts.includes(blueprintDraft.defaultEffort as ThinkingEffort)
+                    ? blueprintDraft.defaultEffort
+                    : ""
+                }
+                disabled={blueprintEffortCaps.efforts.length === 0}
+                onChange={(e) =>
+                  setBlueprintDraft({
+                    ...blueprintDraft,
+                    defaultEffort: (e.target.value as ThinkingEffort) || "",
+                  })
+                }
               >
-                {ALL_EFFORTS.map((ef) => (
+                <option value="">
+                  {blueprintEffortCaps.efforts.length === 0
+                    ? t("picker.effortModelDefault")
+                    : t("picker.effortInherit")}
+                </option>
+                {blueprintEffortCaps.efforts.map((ef) => (
                   <option key={ef} value={ef}>{ef}</option>
                 ))}
               </select>
@@ -1786,7 +2041,7 @@ export function App() {
                       defaultHostId: prof?.hostId,
                       defaultProfileId: prof?.id,
                       defaultModel: blueprintDraft.defaultModel.trim() || undefined,
-                      defaultEffort: blueprintDraft.defaultEffort,
+                      defaultEffort: blueprintDraft.defaultEffort || undefined,
                     }),
                   });
                   setModal(null);

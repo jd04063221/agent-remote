@@ -9,6 +9,7 @@ import {
   formatLocalHistoryContext,
   loadAgentRemoteConfig,
   parsePermissionRuleExpr,
+  resolveEffortForModel,
   type AgentRemoteConfig,
 } from "@agent-remote/core";
 import { AcpRemoteSession } from "@agent-remote/driver-antigravity";
@@ -577,8 +578,8 @@ export class AgentRemoteHub {
 
     if (input.hostId) thread.hostId = input.hostId;
     if (input.profileId) thread.profileId = input.profileId;
-    if (input.mainModel !== undefined) thread.model = input.mainModel;
-    if (input.mainEffort !== undefined) thread.effort = input.mainEffort;
+    if ("mainModel" in input) thread.model = input.mainModel || undefined;
+    if ("mainEffort" in input) thread.effort = input.mainEffort || undefined;
     if (input.mode) thread.mode = input.mode;
     if (input.quotaSaverMode !== undefined) thread.quotaSaverMode = input.quotaSaverMode;
     if (input.subagents) thread.subagentOverrides = input.subagents;
@@ -628,9 +629,15 @@ export class AgentRemoteHub {
         rt.pendingHistoryPrefix = undefined;
       }
 
+      const resolvedTurn = this.resolveModelAndEffortForProfile(
+        thread.hostId,
+        thread.profileId,
+        thread.model,
+        thread.effort,
+      );
       await rt.driver.prompt(effectivePrompt, {
-        model: thread.model,
-        effort: thread.effort,
+        model: resolvedTurn.model,
+        effort: resolvedTurn.effort,
       });
 
       if (!thread.ephemeralRemote) {
@@ -709,14 +716,20 @@ export class AgentRemoteHub {
       },
     });
 
-    // Resolve and register Track 2 Federated Subagent tools (enabling agy -> opencode deepseek offload!)
+    // Resolve and register Track 2 Federated Subagent tools (main-host-first by default)
     const blueprints = this.store.listBlueprints();
+    const catalogsByProfile: Record<string, CatalogSnapshot> = {};
+    for (const cat of this.store.listCatalogs()) {
+      catalogsByProfile[cat.profileId] = cat;
+    }
     const plans = resolveSubagentPlans({
       parentHostId: host.id,
       parentProfileId: profile.id,
       parentAgent: profile.agent,
+      parentModel: thread.model ?? profile.defaultModel,
       blueprints,
       overrides: thread.subagentOverrides,
+      catalogsByProfile,
     });
 
     registerFederatedSubagentTools({
@@ -938,6 +951,16 @@ export class AgentRemoteHub {
     });
     const childMcp = new McpJsonRpcHandler(childEngine);
 
+    const sameAsMain = host.id === parentThread.hostId && profile.id === parentThread.profileId;
+    const rawChildModel =
+      call.model ?? (sameAsMain ? parentThread.model : undefined) ?? profile.defaultModel;
+    const resolvedChild = this.resolveModelAndEffortForProfile(
+      host.id,
+      profile.id,
+      rawChildModel,
+      call.effort ?? profile.defaultEffort,
+    );
+
     const built = buildSpawnSpecForAgent({
       sessionId: childId,
       hostId: host.id,
@@ -946,8 +969,8 @@ export class AgentRemoteHub {
       remoteBin: profile.remoteBin,
       localWorkspaceRoot: parentThread.worktreePath,
       localGitBranch: parentThread.branch,
-      model: call.model ?? profile.defaultModel,
-      effort: call.effort ?? profile.defaultEffort,
+      model: resolvedChild.model,
+      effort: resolvedChild.effort,
       ephemeralRemote: parentThread.ephemeralRemote,
       pureInferenceOnly: call.pureInferenceOnly,
       nativePlans: [],
@@ -971,8 +994,8 @@ export class AgentRemoteHub {
         sessionId: childId,
         channel,
         toolEngine: childEngine,
-        model: call.model ?? profile.defaultModel,
-        effort: call.effort ?? profile.defaultEffort,
+        model: resolvedChild.model,
+        effort: resolvedChild.effort,
         ephemeralRemote: parentThread.ephemeralRemote,
         systemPromptAppend: built.systemPromptAppend,
         developerInstructions: built.developerInstructions,
@@ -989,8 +1012,8 @@ export class AgentRemoteHub {
       });
 
       await driver.prompt(call.task, {
-        model: call.model ?? profile.defaultModel,
-        effort: call.effort ?? profile.defaultEffort,
+        model: resolvedChild.model,
+        effort: resolvedChild.effort,
       });
 
       const inTok = gotExact ? exactIn : Math.ceil(call.task.length / 4);
@@ -998,8 +1021,8 @@ export class AgentRemoteHub {
       const doneEv = this.store.appendEvent(parentThread.id, "subagent_completed", {
         childId,
         subagentName: call.subagentName,
-        model: call.model ?? profile.defaultModel,
-        effort: call.effort,
+        model: resolvedChild.model,
+        effort: resolvedChild.effort,
         offloadedTokens: inTok + outTok,
         preview: collected.slice(0, 400),
       });
@@ -1019,6 +1042,35 @@ export class AgentRemoteHub {
       channel.kill();
       await spawned.localHttpMcp?.close();
     }
+  }
+
+  private resolveModelAndEffortForProfile(
+    hostId: string,
+    profileId: string,
+    requestedModel?: string,
+    requestedEffort?: ThinkingEffort,
+  ): { model?: string; effort?: ThinkingEffort } {
+    const catalog = this.store
+      .listCatalogs()
+      .find((c) => c.hostId === hostId && c.profileId === profileId);
+    if (!catalog || catalog.models.length === 0) {
+      return { model: requestedModel, effort: requestedEffort };
+    }
+    const targetEntry = requestedModel
+      ? catalog.models.find(
+          (m) =>
+            m.id === requestedModel ||
+            Boolean(m.effortVariantMap && Object.values(m.effortVariantMap).includes(requestedModel)),
+        )
+      : catalog.models.find((m) => m.isDefault);
+    if (!targetEntry) {
+      return { model: requestedModel, effort: requestedEffort };
+    }
+    const resolved = resolveEffortForModel(targetEntry, requestedEffort);
+    return {
+      model: requestedModel ? targetEntry.id : requestedModel,
+      effort: resolved.resolved,
+    };
   }
 
   private async spawnOnHost(

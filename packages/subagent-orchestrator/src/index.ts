@@ -1,4 +1,5 @@
 import type {
+  CatalogSnapshot,
   SubagentBlueprint,
   SubagentTaskOverride,
   ThinkingEffort,
@@ -42,30 +43,61 @@ export type FederatedExecutor = (
 
 const WRITE_TOOLS = new Set(["write_file", "edit_file", "delete_file", "run_command"]);
 
+function catalogContainsModel(catalog: CatalogSnapshot | undefined, modelId: string): boolean {
+  if (!catalog || catalog.models.length === 0) return true;
+  for (const m of catalog.models) {
+    if (m.id === modelId) return true;
+    if (m.effortVariantMap && Object.values(m.effortVariantMap).includes(modelId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Resolves each Subagent Blueprint + per-task Override into either Track 1 (Native Materialization)
  * or Track 2 (Hub-Orchestrated Federated Subagent).
+ *
+ * Main-Host-First policy:
+ * - When a subagent does not explicitly select another Agent Profile, it always stays on the main
+ *   model's host & agent (`parentHostId` / `parentProfileId`).
+ * - If an unpinned subagent carries a foreign model ID that does not exist in the main profile's
+ *   live catalog, it falls back cleanly to `parentModel` (or profile default) instead of failing.
  */
 export function resolveSubagentPlans(params: {
   parentHostId: string;
   parentProfileId: string;
   parentAgent: string;
+  parentModel?: string;
   blueprints: SubagentBlueprint[];
   overrides: Record<string, SubagentTaskOverride>;
+  catalogsByProfile?: Record<string, CatalogSnapshot>;
 }): ResolvedSubagentPlan[] {
   const plans: ResolvedSubagentPlan[] = [];
 
   for (const bp of params.blueprints) {
     const ov = params.overrides[bp.name];
     const enabled = ov?.enabled ?? true;
-    const hostId = ov?.hostId ?? bp.defaultHostId ?? params.parentHostId;
-    const profileId = ov?.profileId ?? bp.defaultProfileId ?? params.parentProfileId;
-    const model = ov?.model ?? bp.defaultModel;
+    const explicitProfileId = ov?.profileId || bp.defaultProfileId || undefined;
+    const explicitHostId = ov?.hostId || (explicitProfileId ? bp.defaultHostId : undefined);
+    const hostId = explicitHostId ?? params.parentHostId;
+    const profileId = explicitProfileId ?? params.parentProfileId;
+    const crossHostOrProfile =
+      hostId !== params.parentHostId || profileId !== params.parentProfileId;
+
+    let model = ov?.model || bp.defaultModel || undefined;
+    const targetCatalog = params.catalogsByProfile?.[profileId];
+    if (model && !crossHostOrProfile && !catalogContainsModel(targetCatalog, model)) {
+      // Do not forward a model belonging to another agent (e.g. OpenCode) to the main host's agent
+      model = undefined;
+    }
+    if (!model && !crossHostOrProfile && params.parentModel) {
+      model = params.parentModel;
+    }
+
     const effort = ov?.effort ?? bp.defaultEffort;
     const requestedMode = ov?.executionMode ?? bp.executionMode;
 
-    const crossHostOrProfile =
-      hostId !== params.parentHostId || profileId !== params.parentProfileId;
     const needsFederatedEffort =
       Boolean(effort) &&
       (params.parentAgent === "antigravity" || params.parentAgent === "gemini");
@@ -117,7 +149,7 @@ export function registerFederatedSubagentTools(options: {
     definition: {
       name: "dispatch_subagent",
       description:
-        "Delegate a scoped coding, research, or testing subtask to a configured remote subagent (can run on a cheaper model such as OpenCode deepseek-4.1-flash to save primary quota).",
+        "Delegate a scoped coding, research, or testing subtask to a configured subagent (prefers the main host's agent by default, or offloads to another configured agent profile).",
       inputSchema: {
         type: "object",
         properties: {

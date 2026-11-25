@@ -103,6 +103,49 @@ describe("Hub persistence, cross-restart resume, incognito mode, exact usage, an
     }
   });
 
+  it("cleans legacy hardcoded deepseek/deepseek-4.1-flash seeds while keeping user-pinned profiles", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ar-bp-migrate-"));
+    dirsToClean.push(tmp);
+    const dbPath = path.join(tmp, "legacy-bp.sqlite");
+
+    const seed = new HubStore(dbPath);
+    seed.upsertBlueprint({
+      name: "explorer",
+      description: "Legacy unpinned explorer",
+      systemPrompt: "",
+      tools: ["read_file"],
+      executionMode: "federated",
+      defaultModel: "deepseek/deepseek-4.1-flash",
+      defaultEffort: "low",
+    });
+    seed.upsertBlueprint({
+      name: "implementer",
+      description: "User-pinned OpenCode implementer",
+      systemPrompt: "",
+      tools: ["edit_file"],
+      executionMode: "auto",
+      defaultHostId: "local",
+      defaultProfileId: "local-opencode",
+      defaultModel: "opencode-go/deepseek-v4.1-flash",
+    });
+    seed.close();
+
+    const reopened = new HubStore(dbPath);
+    try {
+      const bps = reopened.listBlueprints();
+      const explorer = bps.find((b) => b.name === "explorer");
+      expect(explorer?.defaultModel).toBeUndefined();
+      expect(explorer?.defaultEffort).toBeUndefined();
+      expect(explorer?.executionMode).toBe("auto");
+
+      const impl = bps.find((b) => b.name === "implementer");
+      expect(impl?.defaultProfileId).toBe("local-opencode");
+      expect(impl?.defaultModel).toBe("opencode-go/deepseek-v4.1-flash");
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("formats restored local history cleanly", () => {
     const text = formatLocalHistoryContext([
       { kind: "user_message", payload: { text: "What is 2+2?" } },

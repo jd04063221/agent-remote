@@ -42,11 +42,21 @@ export interface ModelCatalogEntry {
   displayName: string;
   source: string;
   isDefault?: boolean;
+  effortVariantMap?: Partial<Record<ThinkingEffort, string>>;
   capabilities: {
     supportsThinking: boolean;
     supportedEfforts: ThinkingEffort[];
     defaultEffort?: ThinkingEffort;
   };
+}
+
+export interface ModelConfigOption {
+  id: string;
+  category: "thought_level" | "mode" | "custom";
+  label: string;
+  type: "select" | "boolean" | "number" | "string";
+  defaultValue?: string;
+  options?: Array<{ value: string; label: string; description?: string }>;
 }
 
 export interface CatalogSnapshot {
@@ -56,6 +66,7 @@ export interface CatalogSnapshot {
   tierName?: string;
   currentModelId?: string;
   models: ModelCatalogEntry[];
+  extraConfigOptions?: ModelConfigOption[];
   fetchedAt: string;
 }
 

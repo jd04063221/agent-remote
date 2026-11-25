@@ -68,7 +68,7 @@ export function parseAgyModelsOutput(rawOutput: string): ModelCatalogEntry[] {
     const line = (segments[segments.length - 1] ?? "").trim();
     if (!line || line.includes("Fetching available models")) continue;
 
-    const match = /^([a-z0-9][a-z0-9._-]+)(?:\t+|\s{2,})(.+)$/.exec(line);
+    const match = /^([a-zA-Z0-9][a-zA-Z0-9._:/-]+)(?:\t+|\s{2,})(.+)$/.exec(line);
     if (!match) continue;
 
     const slug = match[1]!;
@@ -214,14 +214,46 @@ export function parseAgySessionNewCatalog(result: AgySessionNewResult): {
       });
     }
   } else {
-    // Fallback if configOptions omitted
-    const fakeLines = available.map((m) => `${m.modelId}  ${m.name}`).join("\n");
-    models.push(
-      ...parseAgyModelsOutput(fakeLines).map((m) => ({
-        ...m,
-        source: "live-rpc" as const,
-      })),
-    );
+    // Fallback if configOptions omitted (e.g. OpenCode ACP listing provider/model entries in availableModels)
+    const seenBase = new Set<string>();
+    for (const item of available) {
+      const suffixMatch = EFFORT_SUFFIX_RE.exec(item.modelId);
+      const effort = suffixMatch ? normalizeEffort(suffixMatch[1]!) : undefined;
+      const baseId = effort ? item.modelId.slice(0, -suffixMatch![0].length) : item.modelId;
+      if (seenBase.has(baseId)) continue;
+      seenBase.add(baseId);
+      const bucket = variantsByBase.get(baseId);
+      const supportedEfforts = bucket ? sortEfforts(bucket.efforts) : [];
+      const singleFixed =
+        supportedEfforts.length === 1 &&
+        available.filter((a) => {
+          const sm = EFFORT_SUFFIX_RE.exec(a.modelId);
+          const b = sm ? a.modelId.slice(0, -sm[0].length) : a.modelId;
+          return b === baseId;
+        }).length === 1;
+      const id = singleFixed ? item.modelId : baseId;
+      const displayName = singleFixed ? item.name : (bucket?.displayName || item.name || id);
+      models.push({
+        id,
+        displayName,
+        source: "live-rpc",
+        isDefault:
+          id === result.models?.currentModelId ||
+          item.modelId === result.models?.currentModelId ||
+          baseId === currentBaseModel,
+        effortVariantMap:
+          bucket && Object.keys(bucket.variantMap).length > 0 ? bucket.variantMap : undefined,
+        capabilities: {
+          supportsThinking: supportedEfforts.length > 0,
+          supportedEfforts,
+          defaultEffort: supportedEfforts.includes("high")
+            ? "high"
+            : supportedEfforts.includes("medium")
+              ? "medium"
+              : supportedEfforts[0],
+        },
+      });
+    }
   }
 
   const extraConfigOptions: ModelParam[] = configOptions

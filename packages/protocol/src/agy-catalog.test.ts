@@ -133,4 +133,29 @@ describe("parseAgySessionNewCatalog (live agy acp fixture)", () => {
       "mode",
     ]);
   });
+
+  it("preserves provider/model IDs (e.g. OpenCode opencode-go/deepseek-v4.1-flash) without inventing efforts", () => {
+    const openCodeResult: AgySessionNewResult = {
+      sessionId: "oc-sess-1",
+      models: {
+        currentModelId: "opencode-go/deepseek-v4.1-flash",
+        availableModels: [
+          {
+            modelId: "opencode-go/deepseek-v4.1-flash",
+            name: "DeepSeek V4.1 Flash",
+          },
+          {
+            modelId: "openrouter/anthropic/claude-sonnet-4",
+            name: "Claude Sonnet 4",
+          },
+        ],
+      },
+    };
+    const parsed = parseAgySessionNewCatalog(openCodeResult);
+    expect(parsed.models).toHaveLength(2);
+    const ds = parsed.models.find((m) => m.id === "opencode-go/deepseek-v4.1-flash");
+    expect(ds?.displayName).toBe("DeepSeek V4.1 Flash");
+    expect(ds?.isDefault).toBe(true);
+    expect(ds?.capabilities.supportedEfforts).toEqual([]);
+  });
 });
