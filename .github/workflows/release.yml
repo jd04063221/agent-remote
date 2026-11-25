@@ -193,6 +193,12 @@ jobs:
     needs: [build-remote-node, build-cli-bundle, build-desktop]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
       - uses: actions/download-artifact@v4
         with:
           path: dist-all
@@ -205,10 +211,17 @@ jobs:
           else
             echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+      - name: Generate release notes comparing against previous version
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          node scripts/extract-release-notes.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}" --out release-notes.md
+          cat release-notes.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: "agent-remote ${{ steps.tag.outputs.name }}"
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           files: dist-all/*
