@@ -25,7 +25,7 @@ import (
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/ringbuf"
 )
 
-const NodeVersion = "0.1.2"
+const NodeVersion = "0.1.3"
 
 type Config struct {
 	Auth        *auth.Authenticator

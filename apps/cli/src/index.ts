@@ -45,7 +45,7 @@ function getCliVersion(): string {
   } catch {
     // fallback below
   }
-  return "0.1.2";
+  return "0.1.3";
 }
 
 function getFlag(name: string, fallback?: string): string | undefined {
