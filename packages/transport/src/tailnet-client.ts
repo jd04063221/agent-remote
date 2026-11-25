@@ -268,6 +268,47 @@ export class TailnetDirectClient extends EventEmitter {
     return frame.payload as { rawOutput: string; error?: string };
   }
 
+  async fetchQuota(
+    agent: string,
+    binary?: string,
+  ): Promise<{
+    agent: string;
+    available: boolean;
+    source: "oauth-api" | "app-server-rpc" | "provider-balance" | "cli-probe" | "unavailable";
+    planTier?: string;
+    windows: Array<{
+      label: string;
+      usedPercent?: number;
+      remainingPercent?: number;
+      remainingAmount?: string;
+      resetsAt?: string;
+    }>;
+    note?: string;
+  }> {
+    const frame = await this.requestControl(
+      {
+        ch: 0,
+        type: "quota_req",
+        payload: { agent, binary },
+      },
+      15_000,
+    );
+    return frame.payload as {
+      agent: string;
+      available: boolean;
+      source: "oauth-api" | "app-server-rpc" | "provider-balance" | "cli-probe" | "unavailable";
+      planTier?: string;
+      windows: Array<{
+        label: string;
+        usedPercent?: number;
+        remainingPercent?: number;
+        remainingAmount?: string;
+        resetsAt?: string;
+      }>;
+      note?: string;
+    };
+  }
+
   async spawnSession(spec: SpawnSessionPayload): Promise<RemoteSessionChannel> {
     const frame = await this.requestControl({
       ch: 0,

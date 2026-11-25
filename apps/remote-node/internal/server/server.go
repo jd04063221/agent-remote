@@ -21,6 +21,7 @@ import (
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/mcpbridge"
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/probe"
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/protocol"
+	"github.com/jd04063221/agent-remote/apps/remote-node/internal/quota"
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/ringbuf"
 )
 
@@ -216,6 +217,20 @@ func (s *Server) dispatch(ctx context.Context, conn *activeConn, frame protocol.
 			Ch:      0,
 			ID:      frame.ID,
 			Type:    protocol.TypeCatalogRes,
+			Payload: protocol.MustMarshalPayload(res),
+		})
+
+	case protocol.TypeQuotaReq:
+		var req protocol.QuotaReqPayload
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			sendErr(conn, 0, frame.ID, "invalid_payload", err.Error())
+			return
+		}
+		res := quota.Fetch(ctx, req)
+		_ = conn.Send(protocol.Frame{
+			Ch:      0,
+			ID:      frame.ID,
+			Type:    protocol.TypeQuotaRes,
 			Payload: protocol.MustMarshalPayload(res),
 		})
 

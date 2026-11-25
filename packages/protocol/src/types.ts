@@ -128,6 +128,28 @@ export const TokenUsageBreakdownSchema = z.object({
 });
 export type TokenUsageBreakdown = z.infer<typeof TokenUsageBreakdownSchema>;
 
+export const QuotaWindowSchema = z.object({
+  label: z.string(),
+  usedPercent: z.number().min(0).max(100).optional(),
+  remainingPercent: z.number().min(0).max(100).optional(),
+  remainingAmount: z.string().optional(),
+  resetsAt: z.string().optional(),
+});
+export type QuotaWindow = z.infer<typeof QuotaWindowSchema>;
+
+export const QuotaSnapshotSchema = z.object({
+  hostId: z.string(),
+  profileId: z.string(),
+  agent: AgentKindSchema,
+  available: z.boolean(),
+  source: z.enum(["oauth-api", "app-server-rpc", "provider-balance", "cli-probe", "unavailable"]),
+  planTier: z.string().optional(),
+  windows: z.array(QuotaWindowSchema).default([]),
+  note: z.string().optional(),
+  fetchedAt: z.string(),
+});
+export type QuotaSnapshot = z.infer<typeof QuotaSnapshotSchema>;
+
 /**
  * Multiplexed WebSocket wire envelope shared between Local Hub (TS) and apps/remote-node (Go).
  * Channel 0 is the node control plane; channels >= 1 carry isolated remote agent sessions.
@@ -141,6 +163,8 @@ export const MUX_FRAME_TYPES = [
   "probe_res",
   "catalog_req",
   "catalog_res",
+  "quota_req",
+  "quota_res",
   "spawn_session",
   "session_ready",
   "session_resume",

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@agent-remote/protocol": "workspace:*",
+    "@agent-remote/tool-plane": "workspace:*",
     "@agent-remote/transport": "workspace:*",
     "@agent-remote/acp-server": "workspace:*",
     "@agent-remote/hub-server": "workspace:*"

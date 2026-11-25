@@ -3,6 +3,7 @@ import type {
   ApprovalRequest,
   CatalogSnapshot,
   HubStateSnapshot,
+  QuotaSnapshot,
   SubagentOverride,
   ThinkingEffort,
   ThreadEvent,
@@ -114,6 +115,17 @@ export function App() {
           catalogs: [
             ...prev.catalogs.filter(
               (c) => !(c.hostId === snap.hostId && c.profileId === snap.profileId),
+            ),
+            snap,
+          ],
+        }));
+      } else if (msg.type === "quota_updated") {
+        const snap = msg.payload as QuotaSnapshot;
+        setState((prev) => ({
+          ...prev,
+          quotas: [
+            ...(prev.quotas ?? []).filter(
+              (q) => !(q.hostId === snap.hostId && q.profileId === snap.profileId),
             ),
             snap,
           ],
@@ -854,6 +866,56 @@ export function App() {
 
         {inspectorTab === "quota" && (
           <div className="inspector-body">
+            <div className="section-head">
+              <span>REMOTE AGENT REMAINING QUOTA</span>
+              {activeProfile && (
+                <button
+                  className="btn ghost xs"
+                  onClick={async () => {
+                    try {
+                      await api(`/api/profiles/${activeProfile.id}/refresh-quota`, { method: "POST" });
+                      notify(`Checked quota for ${activeProfile.name}`);
+                    } catch (e) {
+                      notify(`Quota check failed: ${(e as Error).message}`);
+                    }
+                  }}
+                >
+                  Check ↻
+                </button>
+              )}
+            </div>
+            {(() => {
+              const q = activeProfile
+                ? (state.quotas ?? []).find(
+                    (x) => x.hostId === activeProfile.hostId && x.profileId === activeProfile.id,
+                  )
+                : undefined;
+              if (!q) {
+                return <div className="muted-sm">Click "Check ↻" to query remote quota / balance (credentials stay on remote host).</div>;
+              }
+              return (
+                <div className="fleet-card">
+                  <div className="fleet-head">
+                    <strong>{q.planTier || q.agent}</strong>
+                    <span className="badge">{q.source}</span>
+                  </div>
+                  {q.windows.map((w) => (
+                    <div key={w.label} className="profile-row">
+                      <span>{w.label}</span>
+                      <strong>
+                        {w.remainingAmount ??
+                          (w.remainingPercent !== undefined ? `${w.remainingPercent.toFixed(0)}% left` : "—")}
+                      </strong>
+                    </div>
+                  ))}
+                  {q.note && <div className="muted-sm" style={{ marginTop: 6 }}>{q.note}</div>}
+                </div>
+              );
+            })()}
+
+            <div className="section-head" style={{ marginTop: 8 }}>
+              <span>QUOTA-SAVER OFFLOAD METRICS</span>
+            </div>
             <div className="quota-stat">
               <div>Primary Brain Tokens</div>
               <strong>{mainTotal.toLocaleString()}</strong>

@@ -119,10 +119,31 @@ export interface ApprovalRequest {
   command?: string;
 }
 
+export interface QuotaWindow {
+  label: string;
+  usedPercent?: number;
+  remainingPercent?: number;
+  remainingAmount?: string;
+  resetsAt?: string;
+}
+
+export interface QuotaSnapshot {
+  hostId: string;
+  profileId: string;
+  agent: string;
+  available: boolean;
+  source: string;
+  planTier?: string;
+  windows: QuotaWindow[];
+  note?: string;
+  fetchedAt: string;
+}
+
 export interface HubStateSnapshot {
   hosts: HostState[];
   profiles: ProfileState[];
   catalogs: CatalogSnapshot[];
+  quotas?: QuotaSnapshot[];
   blueprints: SubagentBlueprint[];
   threads: ThreadState[];
   pendingApprovals: ApprovalRequest[];

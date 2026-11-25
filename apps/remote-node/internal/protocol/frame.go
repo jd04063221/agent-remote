@@ -21,6 +21,8 @@ const (
 	TypeProbeRes      = "probe_res"
 	TypeCatalogReq    = "catalog_req"
 	TypeCatalogRes    = "catalog_res"
+	TypeQuotaReq      = "quota_req"
+	TypeQuotaRes      = "quota_res"
 	TypeSpawnSession  = "spawn_session"
 	TypeSessionReady  = "session_ready"
 	TypeSessionResume = "session_resume"
@@ -68,6 +70,28 @@ type CatalogResPayload struct {
 	Agent     string `json:"agent"`
 	RawOutput string `json:"rawOutput"`
 	Error     string `json:"error,omitempty"`
+}
+
+type QuotaReqPayload struct {
+	Agent  string `json:"agent"`
+	Binary string `json:"binary,omitempty"`
+}
+
+type QuotaWindow struct {
+	Label            string   `json:"label"`
+	UsedPercent      *float64 `json:"usedPercent,omitempty"`
+	RemainingPercent *float64 `json:"remainingPercent,omitempty"`
+	RemainingAmount  string   `json:"remainingAmount,omitempty"`
+	ResetsAt         string   `json:"resetsAt,omitempty"`
+}
+
+type QuotaResPayload struct {
+	Agent     string        `json:"agent"`
+	Available bool          `json:"available"`
+	Source    string        `json:"source"`
+	PlanTier  string        `json:"planTier,omitempty"`
+	Windows   []QuotaWindow `json:"windows"`
+	Note      string        `json:"note,omitempty"`
 }
 
 type SpawnSessionPayload struct {

@@ -12,6 +12,7 @@ import { parseKiroModelsOutput } from "@agent-remote/driver-kiro";
 import {
   parseAgyModelsOutput,
   type CatalogSnapshot,
+  type QuotaSnapshot,
   type SubagentBlueprint,
   type SubagentTaskOverride,
   type ThinkingEffort,
@@ -147,6 +148,7 @@ export class AgentRemoteHub {
       hosts,
       profiles: this.store.listProfiles(),
       catalogs: this.store.listCatalogs(),
+      quotas: this.store.listQuotas(),
       blueprints: this.store.listBlueprints(),
       threads: this.store.listThreads(),
       pendingApprovals: Array.from(this.pendingApprovals.values()).map((a) => a.request),
@@ -249,6 +251,51 @@ export class AgentRemoteHub {
     } finally {
       channel.kill();
     }
+  }
+
+  async refreshProfileQuota(profileId: string): Promise<QuotaSnapshot> {
+    const profile = this.store.getProfile(profileId);
+    if (!profile) throw new Error(`Unknown profile: ${profileId}`);
+    const host = this.store.getHost(profile.hostId);
+    if (!host) throw new Error(`Unknown host: ${profile.hostId}`);
+
+    if (host.transport !== "tailnet-direct") {
+      const snap: QuotaSnapshot = {
+        hostId: host.id,
+        profileId: profile.id,
+        agent: profile.agent,
+        available: false,
+        source: "unavailable",
+        windows: [],
+        note: "Remote quota probing requires Tailnet Direct remote-node.",
+        fetchedAt: new Date().toISOString(),
+      };
+      this.store.upsertQuota(snap);
+      this.broadcast({ type: "quota_updated", payload: snap });
+      return snap;
+    }
+
+    await this.connectHost(host.id);
+    const client = this.clients.get(host.id)!;
+    const raw = await client.fetchQuota(profile.agent, profile.remoteBin);
+    const catalog = this.store
+      .listCatalogs()
+      .find((c) => c.hostId === host.id && c.profileId === profile.id);
+
+    const snap: QuotaSnapshot = {
+      hostId: host.id,
+      profileId: profile.id,
+      agent: profile.agent,
+      available: raw.available,
+      source: raw.source,
+      planTier: raw.planTier ?? catalog?.tierName,
+      windows: raw.windows ?? [],
+      note: raw.note,
+      fetchedAt: new Date().toISOString(),
+    };
+    this.store.upsertQuota(snap);
+    this.broadcast({ type: "quota_updated", payload: snap });
+    return snap;
   }
 
   async createThread(input: {
@@ -718,7 +765,7 @@ export class AgentRemoteHub {
         return sendJson(res, 200, { ok: true, profile: body });
       }
 
-      const profMatch = /^\/api\/profiles\/([^/]+)(\/refresh-models)?$/.exec(pathname);
+      const profMatch = /^\/api\/profiles\/([^/]+)(\/(refresh-models|refresh-quota))?$/.exec(pathname);
       if (profMatch) {
         const profileId = decodeURIComponent(profMatch[1]!);
         if (req.method === "DELETE" && !profMatch[2]) {
@@ -726,8 +773,12 @@ export class AgentRemoteHub {
           this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
           return sendJson(res, 200, { ok: true });
         }
-        if (req.method === "POST" && profMatch[2] === "/refresh-models") {
+        if (req.method === "POST" && profMatch[3] === "refresh-models") {
           const snapshot = await this.refreshProfileModels(profileId);
+          return sendJson(res, 200, { ok: true, snapshot });
+        }
+        if (req.method === "POST" && profMatch[3] === "refresh-quota") {
+          const snapshot = await this.refreshProfileQuota(profileId);
           return sendJson(res, 200, { ok: true, snapshot });
         }
       }

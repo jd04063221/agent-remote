@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AgentKind,
   CatalogSnapshot,
+  QuotaSnapshot,
   SubagentBlueprint,
   SubagentTaskOverride,
   ThinkingEffort,
@@ -131,6 +132,14 @@ export class HubStore {
       );
 
       CREATE TABLE IF NOT EXISTS model_catalogs (
+        cache_key TEXT PRIMARY KEY,
+        host_id TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS quota_snapshots (
         cache_key TEXT PRIMARY KEY,
         host_id TEXT NOT NULL,
         profile_id TEXT NOT NULL,
@@ -289,6 +298,26 @@ export class HubStore {
     this.db
       .prepare(
         `INSERT INTO model_catalogs (cache_key, host_id, profile_id, snapshot_json, fetched_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(cache_key) DO UPDATE SET
+           snapshot_json=excluded.snapshot_json, fetched_at=excluded.fetched_at`,
+      )
+      .run(key, snapshot.hostId, snapshot.profileId, JSON.stringify(snapshot), snapshot.fetchedAt);
+  }
+
+  // ---- Remote Quota Cache ----
+  listQuotas(): QuotaSnapshot[] {
+    const rows = this.db.prepare("SELECT snapshot_json FROM quota_snapshots").all() as Array<{
+      snapshot_json: string;
+    }>;
+    return rows.map((r) => JSON.parse(r.snapshot_json) as QuotaSnapshot);
+  }
+
+  upsertQuota(snapshot: QuotaSnapshot): void {
+    const key = `${snapshot.hostId}::${snapshot.profileId}`;
+    this.db
+      .prepare(
+        `INSERT INTO quota_snapshots (cache_key, host_id, profile_id, snapshot_json, fetched_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(cache_key) DO UPDATE SET
            snapshot_json=excluded.snapshot_json, fetched_at=excluded.fetched_at`,
