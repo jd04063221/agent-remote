@@ -68,7 +68,7 @@ export function parseAgyModelsOutput(rawOutput: string): ModelCatalogEntry[] {
     const line = (segments[segments.length - 1] ?? "").trim();
     if (!line || line.includes("Fetching available models")) continue;
 
-    const match = /^([a-z0-9][a-z0-9._-]+)\s{2,}(.+)$/.exec(line);
+    const match = /^([a-z0-9][a-z0-9._-]+)(?:\t+|\s{2,})(.+)$/.exec(line);
     if (!match) continue;
 
     const slug = match[1]!;

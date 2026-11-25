@@ -41,6 +41,21 @@ describe("parseAgyModelsOutput (live agy 1.5.16 fixture)", () => {
     const gptOss = models.find((m) => m.id === "gpt-oss-120b-medium");
     expect(gptOss?.capabilities.supportedEfforts).toEqual(["medium"]);
   });
+
+  it("parses non-TTY tab-delimited output from piped agy models", () => {
+    const piped = [
+      "Fetching available models...",
+      "gemini-4-neon-high\tGemini 4 Neon (High)",
+      "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
+      "claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)",
+    ].join("\n");
+    const models = parseAgyModelsOutput(piped);
+    expect(models).toHaveLength(2);
+    expect(models.find((m) => m.id === "gemini-4-neon")?.capabilities.supportedEfforts).toEqual([
+      "high",
+      "xhigh",
+    ]);
+  });
 });
 
 describe("parseAgySessionNewCatalog (live agy acp fixture)", () => {

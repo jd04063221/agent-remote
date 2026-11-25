@@ -1,0 +1,20 @@
+{
+  "name": "agent-remote",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "agent-remote": "./dist/index.js",
+    "ar": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@agent-remote/protocol": "workspace:*",
+    "@agent-remote/transport": "workspace:*",
+    "@agent-remote/acp-server": "workspace:*",
+    "@agent-remote/hub-server": "workspace:*"
+  }
+}

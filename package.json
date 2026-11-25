@@ -16,7 +16,7 @@
     "go:build": "cd apps/remote-node && go build -o bin/agent-remote-node ./cmd/agent-remote-node"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
+    "@types/node": "^26.6.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.3"
   }
