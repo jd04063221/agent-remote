@@ -24,6 +24,10 @@ export class LocalHttpMcpServer {
     this.server = http.createServer((req, res) => {
       void this.onRequest(req, res);
     });
+    // Node.js defaults `requestTimeout` to 300s; disable it so long-running scripts and
+    // delegated subagents over local/SSH HTTP MCP never get forcibly disconnected at 5 minutes.
+    this.server.requestTimeout = 0;
+    this.server.timeout = 0;
     await new Promise<void>((resolve) => {
       this.server!.listen(0, bindHost, () => resolve());
     });

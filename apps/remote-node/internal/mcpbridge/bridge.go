@@ -171,7 +171,7 @@ func (b *Bridge) handleMCP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, res.Body)
 	case <-r.Context().Done():
 		http.Error(w, errors.New("request cancelled").Error(), http.StatusRequestTimeout)
-	case <-time.After(10 * time.Minute):
+	case <-time.After(2 * time.Hour):
 		http.Error(w, "mcp tool execution timeout", http.StatusGatewayTimeout)
 	}
 }

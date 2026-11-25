@@ -76,7 +76,7 @@ export class StdioMcpClient {
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<{ ok: boolean; content: string }> {
-    const res = await this.request("tools/call", { name, arguments: args }, 60_000);
+    const res = await this.request("tools/call", { name, arguments: args }, 600_000);
     const items = (res.content ?? []) as Array<{ text?: string }>;
     const text = items.map((i) => i.text ?? "").join("\n");
     return { ok: !res.isError, content: text };

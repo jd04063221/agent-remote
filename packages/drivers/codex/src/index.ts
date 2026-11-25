@@ -287,7 +287,7 @@ export class CodexAppServerSession extends EventEmitter {
   private turnEmittedUsage = false;
   private readonly pending = new Map<
     number,
-    { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
+    { resolve: (r: unknown) => void; reject: (e: Error) => void; timer?: NodeJS.Timeout }
   >();
 
   constructor(
@@ -306,7 +306,7 @@ export class CodexAppServerSession extends EventEmitter {
       this.turnDone?.();
       this.turnDone = undefined;
       for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
+        if (p.timer) clearTimeout(p.timer);
         p.reject(new Error("codex app-server exited"));
       }
       this.pending.clear();
@@ -416,7 +416,7 @@ export class CodexAppServerSession extends EventEmitter {
           model: options?.model,
           reasoning_effort: options?.effort,
         },
-        600_000,
+        0,
       ).catch((err) => {
         this.turnDone = undefined;
         reject(err);
@@ -432,10 +432,13 @@ export class CodexAppServerSession extends EventEmitter {
   private request(method: string, params: Record<string, unknown>, timeoutMs = 25_000): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Codex RPC "${method}" timed out`));
-      }, timeoutMs);
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              this.pending.delete(id);
+              reject(new Error(`Codex RPC "${method}" timed out`));
+            }, timeoutMs)
+          : undefined;
       this.pending.set(id, { resolve, reject, timer });
       this.send({ jsonrpc: "2.0", id, method, params });
     });
@@ -471,7 +474,7 @@ export class CodexAppServerSession extends EventEmitter {
       const entry = this.pending.get(Number(msg.id));
       if (!entry) return;
       this.pending.delete(Number(msg.id));
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       if (msg.error) entry.reject(new Error(msg.error.message));
       else entry.resolve(msg.result);
       return;

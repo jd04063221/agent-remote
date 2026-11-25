@@ -44,7 +44,7 @@ export class AcpRemoteSession extends EventEmitter {
   private turnEmittedUsage = false;
   private readonly pending = new Map<
     number,
-    { resolve: (res: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+    { resolve: (res: unknown) => void; reject: (err: Error) => void; timer?: NodeJS.Timeout }
   >();
 
   constructor(options: AcpClientSessionOptions) {
@@ -58,7 +58,7 @@ export class AcpRemoteSession extends EventEmitter {
     this.channel.on("stderr", (chunk: string) => this.emit("stderr", chunk));
     this.channel.on("exit", (info: unknown) => {
       for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
+        if (p.timer) clearTimeout(p.timer);
         p.reject(new Error("Remote ACP process exited"));
       }
       this.pending.clear();
@@ -203,16 +203,19 @@ export class AcpRemoteSession extends EventEmitter {
     }
   }
 
-  async prompt(text: string): Promise<unknown> {
+  async prompt(text: string, options?: { timeoutMs?: number }): Promise<unknown> {
     if (!this.remoteSessionId) throw new Error("ACP session not initialized");
     this.turnEmittedUsage = false;
+    // Do not impose an artificial 10-minute wall-clock cutoff on `session/prompt`:
+    // long scripts, subagents, multi-step refactors, or approval pauses can legitimately run longer.
+    // The request still settles immediately if the remote process exits or the user cancels the turn.
     const res = await this.request(
       "session/prompt",
       {
         sessionId: this.remoteSessionId,
         prompt: [{ type: "text", text }],
       },
-      600_000,
+      options?.timeoutMs ?? 0,
     );
     if (!this.turnEmittedUsage) {
       const usage = extractAcpUsage(res);
@@ -264,10 +267,13 @@ export class AcpRemoteSession extends EventEmitter {
   ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`ACP request "${method}" timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              this.pending.delete(id);
+              reject(new Error(`ACP request "${method}" timed out after ${timeoutMs}ms`));
+            }, timeoutMs)
+          : undefined;
       this.pending.set(id, { resolve, reject, timer });
       this.send({ jsonrpc: "2.0", id, method, params });
     });
@@ -305,7 +311,7 @@ export class AcpRemoteSession extends EventEmitter {
       const entry = this.pending.get(id);
       if (!entry) return;
       this.pending.delete(id);
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       if (msg.error) {
         entry.reject(new Error(`ACP error ${msg.error.code}: ${msg.error.message}`));
       } else {

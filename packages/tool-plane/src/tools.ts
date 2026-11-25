@@ -249,7 +249,7 @@ export class LocalToolEngine {
           properties: {
             command: { type: "string" },
             cwd: { type: "string" },
-            timeout_ms: { type: "integer", default: 120000 },
+            timeout_ms: { type: "integer", default: 300000 },
           },
           required: ["command"],
         },
@@ -616,7 +616,8 @@ export class LocalToolEngine {
     const cwd = args.cwd
       ? this.sandbox.resolvePath(String(args.cwd), "read")
       : this.sandbox.root;
-    const timeoutMs = Math.max(1000, Math.min(600_000, Number(args.timeout_ms ?? 120_000)));
+    const timeoutMs = Math.max(1000, Math.min(3_600_000, Number(args.timeout_ms ?? 300_000)));
+    const maxWallMs = Math.max(timeoutMs, 3_600_000);
 
     const gate = await this.enforcePolicy(
       ctx.sessionId,
@@ -639,19 +640,6 @@ export class LocalToolEngine {
       let output = "";
       let truncated = false;
       let killedReason: string | undefined;
-
-      const append = (buf: Buffer) => {
-        const text = buf.toString("utf8");
-        ctx.onTerminalOutput?.(text);
-        if (Buffer.byteLength(output) + Buffer.byteLength(text) > MAX_OUTPUT_BYTES) {
-          truncated = true;
-          return;
-        }
-        output += text;
-      };
-
-      child.stdout?.on("data", append);
-      child.stderr?.on("data", append);
 
       const killGroup = (reason: string) => {
         killedReason = reason;
@@ -682,18 +670,45 @@ export class LocalToolEngine {
         }
       };
 
-      const timer = setTimeout(() => killGroup(`Timed out after ${timeoutMs}ms`), timeoutMs);
+      // Inactivity timer resets whenever the command emits stdout/stderr so active long-running
+      // scripts (builds, tests, training jobs) do not get prematurely killed; hard wall-clock ceiling still applies.
+      let idleTimer = setTimeout(() => killGroup(`Timed out after ${timeoutMs}ms of inactivity`), timeoutMs);
+      const resetIdleTimer = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => killGroup(`Timed out after ${timeoutMs}ms of inactivity`), timeoutMs);
+      };
+      const wallTimer = setTimeout(() => killGroup(`Exceeded max execution limit of ${maxWallMs}ms`), maxWallMs);
+
+      const append = (buf: Buffer) => {
+        resetIdleTimer();
+        const text = buf.toString("utf8");
+        ctx.onTerminalOutput?.(text);
+        if (Buffer.byteLength(output) + Buffer.byteLength(text) > MAX_OUTPUT_BYTES) {
+          truncated = true;
+          return;
+        }
+        output += text;
+      };
+
+      child.stdout?.on("data", append);
+      child.stderr?.on("data", append);
+
       const onAbort = () => killGroup("Cancelled by user");
       ctx.signal?.addEventListener("abort", onAbort, { once: true });
 
+      const clearAllTimers = () => {
+        clearTimeout(idleTimer);
+        clearTimeout(wallTimer);
+      };
+
       child.on("error", (err) => {
-        clearTimeout(timer);
+        clearAllTimers();
         ctx.signal?.removeEventListener("abort", onAbort);
         resolve({ ok: false, content: `Failed to spawn command: ${err.message}` });
       });
 
       child.on("close", (code) => {
-        clearTimeout(timer);
+        clearAllTimers();
         ctx.signal?.removeEventListener("abort", onAbort);
         const suffix = truncated ? "\n...[output truncated at 64KB]" : "";
         if (killedReason) {

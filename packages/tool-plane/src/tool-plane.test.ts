@@ -160,4 +160,34 @@ describe("@agent-remote/tool-plane", () => {
     expect(cmdRes.ok).toBe(true);
     expect(cmdRes.content).toContain("hi-from-local");
   });
+
+  it("resets run_command inactivity timer while script emits output and times out silent hangs", async () => {
+    const sandbox = new WorkspaceSandbox({ workspaceRoot: tmpRoot });
+    const policy = new PolicyEngine({ mode: "workspace-full" });
+    const engine = new LocalToolEngine({ sandbox, policy });
+
+    // Emits 3 ticks 500ms apart (1500ms total > 1000ms idle timeout) -> must succeed
+    const activeRes = await engine.executeTool(
+      "run_command",
+      {
+        command: `node -e "let n=0; const t=setInterval(()=>{ console.log('tick',++n); if(n===3){ clearInterval(t); } }, 450);"`,
+        timeout_ms: 1000,
+      },
+      { sessionId: "s-active" },
+    );
+    expect(activeRes.ok).toBe(true);
+    expect(activeRes.content).toContain("tick 3");
+
+    // Silent hang -> must time out after 1000ms of inactivity
+    const hangRes = await engine.executeTool(
+      "run_command",
+      {
+        command: `node -e "setTimeout(()=>{}, 5000)"`,
+        timeout_ms: 1000,
+      },
+      { sessionId: "s-hang" },
+    );
+    expect(hangRes.ok).toBe(false);
+    expect(hangRes.content).toContain("inactivity");
+  });
 });
