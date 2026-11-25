@@ -15,6 +15,7 @@ import {
   resolveEffortCapabilities,
   type ModelPickerOption,
 } from "./model-utils";
+import { MarkdownContent } from "./MarkdownContent";
 import { ModelPicker } from "./ModelPicker";
 import type {
   ApprovalRequest,
@@ -1145,7 +1146,12 @@ export function App() {
                   return (
                     <details key={b.id} className="thought-box">
                       <summary>{t("feed.thinking")}</summary>
-                      <pre className="msg-text">{b.text}</pre>
+                      <MarkdownContent
+                        className="md-muted"
+                        content={b.text ?? ""}
+                        copyLabel={t("common.copy")}
+                        copiedLabel={t("common.copied")}
+                      />
                     </details>
                   );
                 }
@@ -1153,7 +1159,11 @@ export function App() {
                   return (
                     <div key={b.id} className="msg assistant">
                       <div className="msg-label">{activeProfile?.name ?? t("feed.agent")}</div>
-                      <pre className="msg-text">{b.text}</pre>
+                      <MarkdownContent
+                        content={b.text ?? ""}
+                        copyLabel={t("common.copy")}
+                        copiedLabel={t("common.copied")}
+                      />
                     </div>
                   );
                 }
@@ -1213,16 +1223,35 @@ export function App() {
                       {live?.thought && (
                         <details className="subagent-thought" open={isRunning && !streamText}>
                           <summary>{t("feed.thinking")}</summary>
-                          <pre className="msg-text">{live.thought}</pre>
+                          <MarkdownContent
+                            className="md-muted md-compact"
+                            content={live.thought}
+                            copyLabel={t("common.copy")}
+                            copiedLabel={t("common.copied")}
+                          />
                         </details>
                       )}
                       {streamText &&
                         (isRunning ? (
-                          <pre className="subagent-stream">{streamText}</pre>
+                          <div className="subagent-stream">
+                            <MarkdownContent
+                              className="md-compact"
+                              content={streamText}
+                              copyLabel={t("common.copy")}
+                              copiedLabel={t("common.copied")}
+                            />
+                          </div>
                         ) : (
                           <details className="subagent-thought">
                             <summary>{t("feed.subagentOutput")}</summary>
-                            <pre className="subagent-stream">{streamText}</pre>
+                            <div className="subagent-stream">
+                              <MarkdownContent
+                                className="md-compact"
+                                content={streamText}
+                                copyLabel={t("common.copy")}
+                                copiedLabel={t("common.copied")}
+                              />
+                            </div>
                           </details>
                         ))}
                       {done && (
@@ -1330,7 +1359,16 @@ export function App() {
                   {cmpBlocks.map((cb) => (
                     <div key={cb.id} className={`msg ${cb.kind === "user_message" ? "user" : "assistant"}`}>
                       <div className="msg-label">{cb.kind === "user_message" ? t("feed.you") : cmpThread?.profileId}</div>
-                      <pre className="msg-text">{cb.text}</pre>
+                      {cb.kind === "user_message" ? (
+                        <pre className="msg-text">{cb.text}</pre>
+                      ) : (
+                        <MarkdownContent
+                          className={cb.kind === "thought_delta" ? "md-muted" : undefined}
+                          content={cb.text}
+                          copyLabel={t("common.copy")}
+                          copiedLabel={t("common.copied")}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
