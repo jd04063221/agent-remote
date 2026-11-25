@@ -4,6 +4,7 @@ directories:
   output: release
 files:
   - dist/**/*
+  - node_modules/**/*
   - package.json
 extraResources:
   - from: ../web/dist

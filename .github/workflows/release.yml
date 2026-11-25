@@ -55,7 +55,7 @@ jobs:
       - name: Stage portable CLI + Web bundle
         run: |
           mkdir -p release-bundle
-          pnpm --filter agent-remote deploy --prod release-bundle/agent-remote
+          pnpm --filter agent-remote deploy --legacy --prod release-bundle/agent-remote
           mkdir -p release-bundle/agent-remote/web
           cp -r apps/web/dist release-bundle/agent-remote/web/dist
           tar -czf agent-remote-cli-web.tar.gz -C release-bundle agent-remote
@@ -70,19 +70,26 @@ jobs:
   build-desktop:
     name: Build Electron Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
-            script: dist:mac
-            artifact_glob: "apps/desktop/release/*.dmg\napps/desktop/release/*.zip"
+            eb_flag: --mac
+            artifact_glob: |
+              desktop-stage/desktop/release/*.dmg
+              desktop-stage/desktop/release/*.zip
           - os: windows-latest
-            script: dist:win
-            artifact_glob: "apps/desktop/release/*.exe"
+            eb_flag: --win
+            artifact_glob: |
+              desktop-stage/desktop/release/*.exe
           - os: ubuntu-latest
-            script: dist:linux
-            artifact_glob: "apps/desktop/release/*.AppImage\napps/desktop/release/*.deb"
+            eb_flag: --linux
+            artifact_glob: |
+              desktop-stage/desktop/release/*.AppImage
+              desktop-stage/desktop/release/*.deb
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -93,15 +100,26 @@ jobs:
           node-version: "26"
           cache: pnpm
       - name: Install dependencies & build monorepo
+        shell: bash
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
-      - name: Install Electron & electron-builder for packaging
-        working-directory: apps/desktop
-        run: pnpm add -D electron@35 electron-builder@25
-      - name: Package desktop installer
-        working-directory: apps/desktop
-        run: pnpm run ${{ matrix.script }}
+      - name: Stage self-contained desktop app
+        shell: bash
+        run: |
+          mkdir -p desktop-stage/web desktop-stage/builder
+          pnpm --filter @agent-remote/desktop deploy --legacy --prod desktop-stage/desktop
+          cp -r apps/web/dist desktop-stage/web/dist
+          cp apps/desktop/electron-builder.yml desktop-stage/desktop/electron-builder.yml
+      - name: Install Electron & electron-builder and package installer
+        shell: bash
+        run: |
+          cd desktop-stage/builder
+          npm init -y
+          npm install --no-audit --no-fund electron@latest electron-builder@latest
+          ELECTRON_VER=$(node -p "require('./node_modules/electron/package.json').version")
+          cd ../desktop
+          ../builder/node_modules/.bin/electron-builder --config electron-builder.yml ${{ matrix.eb_flag }} -c.electronVersion="$ELECTRON_VER"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
