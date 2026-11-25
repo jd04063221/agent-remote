@@ -178,10 +178,28 @@ export class AcpRemoteSession extends EventEmitter {
 
   async setModelAndEffort(model?: string, effort?: ThinkingEffort): Promise<void> {
     if (model) {
-      await this.setConfigOption("model", model);
+      try {
+        await this.setConfigOption("model", model);
+      } catch {
+        // Some ACP backends (e.g. OpenCode ACP) expose `session/set_model` instead of config options
+        if (this.remoteSessionId) {
+          try {
+            await this.request("session/set_model", {
+              sessionId: this.remoteSessionId,
+              modelId: model,
+            });
+          } catch {
+            // Startup config (e.g. OPENCODE_CONFIG_CONTENT) already applied the model
+          }
+        }
+      }
     }
     if (effort) {
-      await this.setConfigOption("thought_level", effort);
+      try {
+        await this.setConfigOption("thought_level", effort);
+      } catch {
+        // Backend/model does not accept dynamic thought_level changes
+      }
     }
   }
 
@@ -361,6 +379,20 @@ export class AcpRemoteSession extends EventEmitter {
     }
   }
 
+  private mapAcpPathToLocal(rawPath: string): string {
+    const trimmed = rawPath.trim();
+    if (!trimmed) return trimmed;
+    const normWorkdir = this.channel.workdir.replaceAll("\\", "/").replace(/\/+$/, "");
+    const normInput = trimmed.replaceAll("\\", "/");
+    if (normWorkdir && normInput.startsWith(normWorkdir + "/")) {
+      return normInput.slice(normWorkdir.length + 1);
+    }
+    if (normWorkdir && normInput === normWorkdir) {
+      return ".";
+    }
+    return trimmed;
+  }
+
   private async handleServerRequest(
     id: number | string,
     method: string,
@@ -371,7 +403,7 @@ export class AcpRemoteSession extends EventEmitter {
         const res = await this.toolEngine.executeTool(
           "read_file",
           {
-            path: String(params.path ?? ""),
+            path: this.mapAcpPathToLocal(String(params.path ?? "")),
             start_line: params.line,
             end_line:
               params.line && params.limit
@@ -391,7 +423,10 @@ export class AcpRemoteSession extends EventEmitter {
       if (method === "fs/write_text_file") {
         const res = await this.toolEngine.executeTool(
           "write_file",
-          { path: String(params.path ?? ""), content: String(params.content ?? "") },
+          {
+            path: this.mapAcpPathToLocal(String(params.path ?? "")),
+            content: String(params.content ?? ""),
+          },
           { sessionId: this.localSessionId },
         );
         if (!res.ok) {
@@ -404,9 +439,13 @@ export class AcpRemoteSession extends EventEmitter {
 
       if (method === "session/request_permission") {
         const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
-        const title = String(toolCall.title ?? toolCall.name ?? "");
+        const serialized = JSON.stringify(toolCall).toLowerCase();
         const options = (params.options ?? []) as Array<{ optionId: string; kind?: string }>;
-        const isLocalMcp = title.includes("agent_remote_local") || title.includes("dispatch_subagent");
+        const isLocalMcp =
+          serialized.includes("agent_remote_local") ||
+          serialized.includes("dispatch_subagent") ||
+          serialized.includes("call_remote_model") ||
+          serialized.includes("mcp__");
 
         if (isLocalMcp || !this.blockRemoteBuiltins) {
           const allowOpt =

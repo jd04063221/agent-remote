@@ -21,6 +21,7 @@ export interface ResolvedSubagentPlan {
 export interface FederatedSubagentCall {
   parentSessionId: string;
   subagentName: string;
+  systemPrompt?: string;
   hostId: string;
   profileId: string;
   model?: string;
@@ -98,6 +99,10 @@ export function resolveSubagentPlans(params: {
     const effort = ov?.effort ?? bp.defaultEffort;
     const requestedMode = ov?.executionMode ?? bp.executionMode;
 
+    // Antigravity and OpenCode do not materialize native Track 1 subagent files;
+    // their subagents always run through Track 2 (`dispatch_subagent`), defaulting to the main host's agent.
+    const supportsNativeSubagents =
+      params.parentAgent !== "antigravity" && params.parentAgent !== "opencode";
     const needsFederatedEffort =
       Boolean(effort) &&
       (params.parentAgent === "antigravity" || params.parentAgent === "gemini");
@@ -105,11 +110,14 @@ export function resolveSubagentPlans(params: {
     let track: "native" | "federated";
     if (requestedMode === "federated") {
       track = "federated";
-    } else if (requestedMode === "native" && !crossHostOrProfile) {
+    } else if (requestedMode === "native" && supportsNativeSubagents && !crossHostOrProfile) {
       track = "native";
     } else {
-      // Auto mode upgrades to Track 2 whenever cross-agent/cross-host or independent effort is needed
-      track = crossHostOrProfile || needsFederatedEffort ? "federated" : "native";
+      // Auto mode uses Track 2 when backend lacks native subagents, crosses hosts/profiles, or needs custom effort
+      track =
+        !supportsNativeSubagents || crossHostOrProfile || needsFederatedEffort
+          ? "federated"
+          : "native";
     }
 
     const readOnly = !bp.tools.some((t) => WRITE_TOOLS.has(t));
@@ -135,14 +143,20 @@ export function resolveSubagentPlans(params: {
  */
 export function registerFederatedSubagentTools(options: {
   engine: LocalToolEngine;
-  plans: ResolvedSubagentPlan[];
+  plans?: ResolvedSubagentPlan[];
+  getPlans?: () => ResolvedSubagentPlan[];
   executor: FederatedExecutor;
   usage: TokenUsageBreakdown;
 }): void {
-  const federatedPlans = options.plans.filter((p) => p.enabled && p.track === "federated");
-  if (federatedPlans.length === 0) return;
+  const resolveLiveFederated = () => {
+    const all = options.getPlans ? options.getPlans() : (options.plans ?? []);
+    return all.filter((p) => p.enabled && p.track === "federated");
+  };
 
-  const byName = new Map(federatedPlans.map((p) => [p.blueprint.name, p]));
+  const initialPlans = resolveLiveFederated();
+  if (initialPlans.length === 0 && !options.getPlans) return;
+
+  const initialNames = initialPlans.map((p) => p.blueprint.name);
 
   const dispatchHandler: CustomToolHandler = {
     action: "mcp",
@@ -155,7 +169,7 @@ export function registerFederatedSubagentTools(options: {
         properties: {
           subagent: {
             type: "string",
-            enum: Array.from(byName.keys()),
+            ...(initialNames.length > 0 ? { enum: initialNames } : {}),
             description: "Configured subagent name",
           },
           task: {
@@ -169,16 +183,18 @@ export function registerFederatedSubagentTools(options: {
     execute: async (args, ctx) => {
       const name = String(args.subagent ?? "");
       const task = String(args.task ?? "");
-      const plan = byName.get(name);
+      const livePlans = resolveLiveFederated();
+      const plan = livePlans.find((p) => p.blueprint.name === name);
       if (!plan) {
         return {
           ok: false,
-          content: `Unknown federated subagent "${name}". Available: ${Array.from(byName.keys()).join(", ")}`,
+          content: `Unknown federated subagent "${name}". Available: ${livePlans.map((p) => p.blueprint.name).join(", ")}`,
         };
       }
       const res = await options.executor({
         parentSessionId: ctx.sessionId,
         subagentName: name,
+        systemPrompt: plan.blueprint.systemPrompt,
         hostId: plan.hostId,
         profileId: plan.profileId,
         model: plan.model,
@@ -204,7 +220,7 @@ export function registerFederatedSubagentTools(options: {
         properties: {
           subagent: {
             type: "string",
-            enum: Array.from(byName.keys()),
+            ...(initialNames.length > 0 ? { enum: initialNames } : {}),
           },
           prompt: { type: "string" },
         },
@@ -214,13 +230,15 @@ export function registerFederatedSubagentTools(options: {
     execute: async (args, ctx) => {
       const name = String(args.subagent ?? "");
       const prompt = String(args.prompt ?? "");
-      const plan = byName.get(name);
+      const livePlans = resolveLiveFederated();
+      const plan = livePlans.find((p) => p.blueprint.name === name);
       if (!plan) {
         return { ok: false, content: `Unknown subagent target "${name}".` };
       }
       const res = await options.executor({
         parentSessionId: ctx.sessionId,
         subagentName: name,
+        systemPrompt: plan.blueprint.systemPrompt,
         hostId: plan.hostId,
         profileId: plan.profileId,
         model: plan.model,

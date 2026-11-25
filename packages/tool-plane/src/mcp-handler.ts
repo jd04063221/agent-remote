@@ -24,6 +24,25 @@ export class McpJsonRpcHandler {
     req: McpRpcReqPayload,
     ctx: ToolExecutionContext,
   ): Promise<McpRpcResPayload> {
+    const httpMethod = (req.method ?? "POST").toUpperCase();
+    if (httpMethod === "GET") {
+      // MCP Streamable-HTTP 2025-03-26: return 405 when optional standalone SSE stream is not offered
+      return {
+        rpcId: req.rpcId,
+        status: 405,
+        headers: { Allow: "POST, DELETE" },
+        body: "",
+      };
+    }
+    if (httpMethod === "DELETE") {
+      return {
+        rpcId: req.rpcId,
+        status: 204,
+        headers: {},
+        body: "",
+      };
+    }
+
     let parsed: JsonRpcRequest;
     try {
       parsed = JSON.parse(req.body) as JsonRpcRequest;
@@ -36,6 +55,16 @@ export class McpJsonRpcHandler {
     }
 
     const id = parsed.id ?? null;
+
+    // JSON-RPC notifications have no id and expect 202 Accepted with empty body per MCP Streamable-HTTP
+    if (parsed.id === undefined && typeof parsed.method === "string" && parsed.method.startsWith("notifications/")) {
+      return {
+        rpcId: req.rpcId,
+        status: 202,
+        headers: {},
+        body: "",
+      };
+    }
 
     switch (parsed.method) {
       case "initialize":

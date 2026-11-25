@@ -944,27 +944,32 @@ export class AgentRemoteHub {
       },
     });
 
-    // Resolve and register Track 2 Federated Subagent tools (main-host-first by default)
-    const blueprints = this.store.listBlueprints();
-    const catalogsByProfile: Record<string, CatalogSnapshot> = {};
-    for (const cat of this.store.listCatalogs()) {
-      catalogsByProfile[cat.profileId] = cat;
-    }
-    const plans = resolveSubagentPlans({
-      parentHostId: host.id,
-      parentProfileId: profile.id,
-      parentAgent: profile.agent,
-      parentModel: thread.model ?? profile.defaultModel,
-      blueprints,
-      overrides: thread.subagentOverrides,
-      catalogsByProfile,
-    });
+    // Resolve and register Track 2 Federated Subagent tools dynamically (main-host-first by default)
+    const resolveLivePlans = () => {
+      const latestThread = this.store.getThread(thread.id) ?? thread;
+      const latestBlueprints = this.store.listBlueprints();
+      const catalogsByProfile: Record<string, CatalogSnapshot> = {};
+      for (const cat of this.store.listCatalogs()) {
+        catalogsByProfile[cat.profileId] = cat;
+      }
+      return resolveSubagentPlans({
+        parentHostId: host.id,
+        parentProfileId: profile.id,
+        parentAgent: profile.agent,
+        parentModel: latestThread.model ?? profile.defaultModel,
+        blueprints: latestBlueprints,
+        overrides: latestThread.subagentOverrides,
+        catalogsByProfile,
+      });
+    };
+    const plans = resolveLivePlans();
 
     registerFederatedSubagentTools({
       engine,
-      plans,
+      getPlans: resolveLivePlans,
       usage: thread.usage,
-      executor: async (call) => this.executeFederatedSubagent(thread, call),
+      executor: async (call) =>
+        this.executeFederatedSubagent(this.store.getThread(thread.id) ?? thread, call),
     });
 
     const quotaPrompt = thread.quotaSaverMode
@@ -1368,6 +1373,24 @@ export class AgentRemoteHub {
 
       emitStage("running");
 
+      const childPromptParts: string[] = [];
+      if (call.systemPrompt?.trim()) {
+        childPromptParts.push(`[Subagent Role: ${call.subagentName}]\n${call.systemPrompt.trim()}`);
+      }
+      if (!call.pureInferenceOnly) {
+        childPromptParts.push(
+          [
+            `[Workspace Context]`,
+            `Local workspace root: ${parentThread.worktreePath}`,
+            `Git branch: ${parentThread.branch}`,
+            `Access mode: ${call.readOnly ? "read-only" : "read-write (scoped edits)"}`,
+            `Use the \`agent_remote_local\` MCP tools (\`read_file\`, \`list_dir\`, \`glob\`, \`grep\`${call.readOnly ? "" : ", `edit_file`, `write_file`"}) with paths relative to the workspace root (e.g. "." or "src/index.ts").`,
+          ].join("\n"),
+        );
+      }
+      childPromptParts.push(`[Delegated Task]\n${call.task}`);
+      const effectiveChildPrompt = childPromptParts.join("\n\n");
+
       const activeDriver = driver;
       await new Promise<void>((resolve, reject) => {
         let settled = false;
@@ -1394,7 +1417,7 @@ export class AgentRemoteHub {
         }
         sig?.addEventListener("abort", onAbort, { once: true });
         void activeDriver
-          .prompt(call.task, {
+          .prompt(effectiveChildPrompt, {
             model: resolvedChild.model,
             effort: resolvedChild.effort,
           })

@@ -18,6 +18,7 @@ export class LocalProcessChannel extends EventEmitter implements RemoteSessionCh
   readonly mcpBearerToken?: string;
 
   private readonly proc: ChildProcessWithoutNullStreams;
+  private readonly ownsWorkdir: boolean;
 
   constructor(options: {
     sessionId: string;
@@ -30,6 +31,7 @@ export class LocalProcessChannel extends EventEmitter implements RemoteSessionCh
   }) {
     super();
     this.sessionId = options.sessionId;
+    this.ownsWorkdir = !options.cwd;
     this.workdir =
       options.cwd ?? fs.mkdtempSync(path.join(os.tmpdir(), "ar-local-sess-"));
     this.mcpEndpointUrl = options.mcpEndpointUrl;
@@ -37,7 +39,11 @@ export class LocalProcessChannel extends EventEmitter implements RemoteSessionCh
 
     const needsWinShell =
       process.platform === "win32" && !options.command.toLowerCase().endsWith(".exe");
-    this.proc = spawn(options.command, options.args ?? [], {
+    const spawnCmd =
+      needsWinShell && options.command.includes(" ")
+        ? `"${options.command}"`
+        : options.command;
+    this.proc = spawn(spawnCmd, options.args ?? [], {
       cwd: this.workdir,
       env: { ...process.env, ...(options.env ?? {}) },
       shell: needsWinShell,
@@ -50,9 +56,24 @@ export class LocalProcessChannel extends EventEmitter implements RemoteSessionCh
 
     this.proc.stdout.on("data", (chunk: string) => this.emit("stdout", chunk));
     this.proc.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
+    this.proc.on("error", (err: Error) => {
+      this.emit("stderr", err.message);
+      this.cleanupWorkdir();
+      this.emit("exit", { sessionId: this.sessionId, exitCode: -1, error: err.message });
+    });
     this.proc.on("close", (code) => {
+      this.cleanupWorkdir();
       this.emit("exit", { sessionId: this.sessionId, exitCode: code ?? 0 });
     });
+  }
+
+  private cleanupWorkdir(): void {
+    if (!this.ownsWorkdir) return;
+    try {
+      fs.rmSync(this.workdir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup race on Windows
+    }
   }
 
   writeStdin(data: string): void {

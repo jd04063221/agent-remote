@@ -253,7 +253,8 @@ export async function attachDriverSession(params: {
     channel: params.channel,
     toolEngine: params.toolEngine,
     sessionId: params.sessionId,
-    blockRemoteBuiltins: true,
+    // OpenCode already disables all built-in tools via OPENCODE_CONFIG_CONTENT, leaving only sandboxed local MCP tools
+    blockRemoteBuiltins: params.agent !== "opencode",
   });
   await acp.initialize();
   const started = await acp.resumeOrStartSession({

@@ -22,6 +22,8 @@ export function buildOpenCodeSpawnSpec(options: OpenCodeLaunchOptions): SpawnSes
       : {
           "*": "deny",
           "agent_remote_local_*": "allow",
+          "agent_remote_local*": "allow",
+          "mcp*": "allow",
         },
     tools: {
       bash: false,
