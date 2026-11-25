@@ -271,6 +271,7 @@ pnpm --filter @agent-remote/desktop start
 ```
 
 **界面功能速览**：
+- **多语言切换（i18n）**：自动跟随浏览器/系统语言，顶部左侧栏提供语言切换器，内置 **简体中文 / 繁體中文 / English / 日本語** 四种语言（自动记住选择，Web 与 Electron 桌面端同步生效）。
 - **左侧边栏（Threads / Remote Fleet / Subagents）**：
   - 管理多台远端主机（一键 `Connect / Probe` 查看远端已装 Agent 与 RTT 延迟）。
   - 管理各 Agent Profile（一键刷新实时模型列表与思考档位）。

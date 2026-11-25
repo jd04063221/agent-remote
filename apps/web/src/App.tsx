@@ -1,4 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  LOCALE_OPTIONS,
+  loadInitialLocale,
+  saveLocale,
+  translate,
+  type Locale,
+  type MessageKey,
+} from "./i18n";
 import type {
   ApprovalRequest,
   CatalogSnapshot,
@@ -22,6 +30,18 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function App() {
+  const [locale, setLocale] = useState<Locale>(() => loadInitialLocale());
+  const t = useCallback(
+    (key: MessageKey, vars?: Record<string, string | number>) => translate(locale, key, vars),
+    [locale],
+  );
+
+  useEffect(() => {
+    saveLocale(locale);
+    document.documentElement.lang = locale;
+    document.title = translate(locale, "app.title");
+  }, [locale]);
+
   const [state, setState] = useState<HubStateSnapshot>({
     hosts: [],
     profiles: [],
@@ -72,6 +92,7 @@ export function App() {
     name: "US Tailnet Node",
     transport: "tailnet-direct",
     endpoint: "ws://127.0.0.1:19420/v1/ws",
+    sshTarget: "",
     authMode: "dev-token",
     bearerToken: "",
     maxSessions: 8,
@@ -86,7 +107,7 @@ export function App() {
     defaultEffort: "high" as ThinkingEffort,
   });
   const [threadDraft, setThreadDraft] = useState({
-    title: "New Task",
+    title: "",
     workspaceRoot: "",
     profileId: "",
     createWorktree: false,
@@ -189,7 +210,7 @@ export function App() {
   }, [compareThreadId]);
 
   const activeThread = useMemo(
-    () => state.threads.find((t) => t.id === activeThreadId) ?? null,
+    () => state.threads.find((th) => th.id === activeThreadId) ?? null,
     [state.threads, activeThreadId],
   );
 
@@ -256,7 +277,7 @@ export function App() {
         }),
       });
     } catch (err) {
-      notify(`Send failed: ${(err as Error).message}`);
+      notify(t("toast.sendFailed", { msg: (err as Error).message }));
     }
   };
 
@@ -264,12 +285,23 @@ export function App() {
     try {
       await api(`/api/approvals/${id}`, {
         method: "POST",
-        body: JSON.stringify(approved ? { approved: true, scope } : { approved: false, reason: "Rejected from UI" }),
+        body: JSON.stringify(
+          approved ? { approved: true, scope } : { approved: false, reason: t("approval.rejectedReason") },
+        ),
       });
       if (activeThreadId) void refreshDiff(activeThreadId);
     } catch (err) {
-      notify(`Approval failed: ${(err as Error).message}`);
+      notify(t("toast.approvalFailed", { msg: (err as Error).message }));
     }
+  };
+
+  const openNewThreadModal = () => {
+    setThreadDraft((d) => ({
+      ...d,
+      title: d.title || t("modal.thread.defaultTitle"),
+      profileId: d.profileId || state.profiles[0]?.id || "",
+    }));
+    setModal("thread");
   };
 
   const events = activeThreadId ? (eventsByThread[activeThreadId] ?? []) : [];
@@ -318,44 +350,50 @@ export function App() {
             <span className={`dot ${wsConnected ? "ok" : "err"}`} />
             <strong>agent-remote</strong>
           </div>
-          <button
-            className="btn primary sm"
-            onClick={() => {
-              setThreadDraft((d) => ({
-                ...d,
-                profileId: d.profileId || state.profiles[0]?.id || "",
-              }));
-              setModal("thread");
-            }}
-          >
-            + Thread
-          </button>
+          <div className="brand-actions">
+            <select
+              className="lang-select"
+              aria-label={t("nav.language")}
+              title={t("nav.language")}
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as Locale)}
+            >
+              {LOCALE_OPTIONS.map((opt) => (
+                <option key={opt.code} value={opt.code}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button className="btn primary sm" onClick={openNewThreadModal}>
+              {t("nav.newThread")}
+            </button>
+          </div>
         </div>
 
         <section className="side-section">
           <div className="section-head">
-            <span>THREADS ({state.threads.length})</span>
+            <span>{t("sidebar.threads", { count: state.threads.length })}</span>
           </div>
           {state.threads.length === 0 && (
-            <div className="empty-hint">Add a Host + Agent Profile, then create a Thread.</div>
+            <div className="empty-hint">{t("sidebar.threadsEmpty")}</div>
           )}
-          {state.threads.map((t) => {
-            const prof = state.profiles.find((p) => p.id === t.profileId);
+          {state.threads.map((th) => {
+            const prof = state.profiles.find((p) => p.id === th.profileId);
             return (
               <div
-                key={t.id}
-                className={`thread-item ${t.id === activeThreadId ? "active" : ""}`}
-                onClick={() => setActiveThreadId(t.id)}
+                key={th.id}
+                className={`thread-item ${th.id === activeThreadId ? "active" : ""}`}
+                onClick={() => setActiveThreadId(th.id)}
               >
                 <div className="thread-row">
-                  <span className={`dot ${t.status === "running" ? "warn" : t.status === "waiting_approval" ? "err" : "ok"}`} />
-                  <span className="thread-title">{t.title}</span>
+                  <span className={`dot ${th.status === "running" ? "warn" : th.status === "waiting_approval" ? "err" : "ok"}`} />
+                  <span className="thread-title">{th.title}</span>
                 </div>
                 <div className="thread-meta">
-                  <span>{prof?.agent ?? t.profileId}@{t.hostId}</span>
-                  <span className="badge">{t.branch}</span>
-                  {t.quotaSaverMode && <span className="badge green">QS</span>}
-                  {t.ephemeralRemote && <span className="badge">Incognito</span>}
+                  <span>{prof?.agent ?? th.profileId}@{th.hostId}</span>
+                  <span className="badge">{th.branch}</span>
+                  {th.quotaSaverMode && <span className="badge green">QS</span>}
+                  {th.ephemeralRemote && <span className="badge">{t("sidebar.incognito")}</span>}
                 </div>
               </div>
             );
@@ -364,10 +402,14 @@ export function App() {
 
         <section className="side-section">
           <div className="section-head">
-            <span>REMOTE FLEET ({state.hosts.length})</span>
+            <span>{t("sidebar.fleet", { count: state.hosts.length })}</span>
             <div className="inline-actions">
-              <button className="btn ghost xs" onClick={() => setModal("host")}>+ Host</button>
-              <button className="btn ghost xs" onClick={() => setModal("profile")}>+ Agent</button>
+              <button className="btn ghost xs" onClick={() => setModal("host")}>
+                {t("sidebar.addHost")}
+              </button>
+              <button className="btn ghost xs" onClick={() => setModal("profile")}>
+                {t("sidebar.addAgent")}
+              </button>
             </div>
           </div>
           {state.hosts.map((h) => {
@@ -384,16 +426,16 @@ export function App() {
                     onClick={async () => {
                       try {
                         await api(`/api/hosts/${h.id}/probe`, { method: "POST" });
-                        notify(`Connected & probed ${h.name}`);
+                        notify(t("toast.connectedProbed", { name: h.name }));
                       } catch (e) {
-                        notify(`Probe failed: ${(e as Error).message}`);
+                        notify(t("toast.probeFailed", { msg: (e as Error).message }));
                       }
                     }}
                   >
-                    {h.rttMs !== undefined ? `${h.rttMs}ms` : "Connect"}
+                    {h.rttMs !== undefined ? `${h.rttMs}ms` : t("sidebar.connect")}
                   </button>
                 </div>
-                <div className="fleet-sub">{h.transport} · {h.endpoint}</div>
+                <div className="fleet-sub">{h.transport} · {h.endpoint || h.id}</div>
                 {hostProfiles.map((p) => {
                   const cat = state.catalogs.find((c) => c.hostId === h.id && c.profileId === p.id);
                   return (
@@ -401,20 +443,25 @@ export function App() {
                       <span>{p.name} ({p.agent})</span>
                       <button
                         className="btn ghost xs"
-                        title="Fetch live available models from remote host"
+                        title={t("sidebar.modelsTooltip")}
                         onClick={async () => {
                           try {
                             const r = await api<{ snapshot: CatalogSnapshot }>(
                               `/api/profiles/${p.id}/refresh-models`,
                               { method: "POST" },
                             );
-                            notify(`Loaded ${r.snapshot.models.length} live models for ${p.name}`);
+                            notify(
+                              t("toast.loadedModels", {
+                                count: r.snapshot.models.length,
+                                name: p.name,
+                              }),
+                            );
                           } catch (e) {
-                            notify(`Model fetch failed: ${(e as Error).message}`);
+                            notify(t("toast.modelFetchFailed", { msg: (e as Error).message }));
                           }
                         }}
                       >
-                        {cat ? `${cat.models.length} models ↻` : "Models ↻"}
+                        {cat ? t("sidebar.modelsCount", { count: cat.models.length }) : t("sidebar.models")}
                       </button>
                     </div>
                   );
@@ -426,7 +473,7 @@ export function App() {
 
         <section className="side-section">
           <div className="section-head">
-            <span>SUBAGENT BLUEPRINTS ({state.blueprints.length})</span>
+            <span>{t("sidebar.subagents", { count: state.blueprints.length })}</span>
             <button
               className="btn ghost xs"
               onClick={() => {
@@ -443,14 +490,14 @@ export function App() {
                 setModal("blueprint");
               }}
             >
-              + Add
+              {t("sidebar.add")}
             </button>
           </div>
           {state.blueprints.map((bp) => (
             <div
               key={bp.name}
               className="bp-row clickable"
-              title="Click to edit subagent blueprint"
+              title={t("sidebar.editSubagentTooltip")}
               onClick={() => {
                 setBlueprintDraft({
                   name: bp.name,
@@ -467,7 +514,7 @@ export function App() {
             >
               <strong>{bp.name}</strong>
               <span className="muted-sm">
-                {bp.defaultModel ?? "inherit"} · {bp.defaultEffort ?? "auto"}
+                {bp.defaultModel ?? t("sidebar.inherit")} · {bp.defaultEffort ?? "auto"}
               </span>
             </div>
           ))}
@@ -478,15 +525,18 @@ export function App() {
       <main className="canvas">
         {!activeThread ? (
           <div className="welcome">
-            <h2>agent-remote Control Workbench</h2>
-            <p>
-              Manage multiple remote agents across Tailscale Tailnet hosts (or multiple agents on the
-              same host) while keeping your codebase, Git worktrees, and shell execution strictly local.
-            </p>
+            <h2>{t("welcome.title")}</h2>
+            <p>{t("welcome.desc")}</p>
             <div className="welcome-steps">
-              <button className="btn primary" onClick={() => setModal("host")}>1. Add Remote Host</button>
-              <button className="btn" onClick={() => setModal("profile")}>2. Add Agent Profile</button>
-              <button className="btn" onClick={() => setModal("thread")}>3. New Thread</button>
+              <button className="btn primary" onClick={() => setModal("host")}>
+                {t("welcome.step1")}
+              </button>
+              <button className="btn" onClick={() => setModal("profile")}>
+                {t("welcome.step2")}
+              </button>
+              <button className="btn" onClick={openNewThreadModal}>
+                {t("welcome.step3")}
+              </button>
             </div>
           </div>
         ) : (
@@ -495,8 +545,8 @@ export function App() {
               <div>
                 <strong>{activeThread.title}</strong>
                 <span className="header-sub">
-                  {activeProfile?.agent ?? activeThread.profileId} @ {activeThread.hostId} · branch{" "}
-                  <code>{activeThread.branch}</code>
+                  {activeProfile?.agent ?? activeThread.profileId} @ {activeThread.hostId} ·{" "}
+                  {t("header.branch")} <code>{activeThread.branch}</code>
                 </span>
               </div>
               <div className="header-badges">
@@ -504,31 +554,38 @@ export function App() {
                   <select
                     value={compareThreadId ?? ""}
                     onChange={(e) => setCompareThreadId(e.target.value || null)}
-                    title="Split-pane compare with another thread"
+                    title={t("header.splitTooltip")}
                   >
-                    <option value="">Single Pane</option>
+                    <option value="">{t("header.singlePane")}</option>
                     {state.threads
-                      .filter((t) => t.id !== activeThread.id)
-                      .map((t) => (
-                        <option key={t.id} value={t.id}>
-                          Split: {t.title} ({t.profileId}@{t.hostId})
+                      .filter((th) => th.id !== activeThread.id)
+                      .map((th) => (
+                        <option key={th.id} value={th.id}>
+                          {t("header.splitPrefix", {
+                            title: th.title,
+                            profile: th.profileId,
+                            host: th.hostId,
+                          })}
                         </option>
                       ))}
                   </select>
                 )}
                 {activeThread.ephemeralRemote ? (
-                  <span className="badge" title="Remote CLI session persistence disabled; local SQLite restores context">
-                    Remote Incognito
+                  <span className="badge" title={t("header.incognitoTooltip")}>
+                    {t("header.incognitoBadge")}
                   </span>
                 ) : (
                   activeThread.remoteSessionId && (
-                    <span className="badge" title={`Resumable remote session: ${activeThread.remoteSessionId}`}>
-                      Resumable
+                    <span
+                      className="badge"
+                      title={t("header.resumableTooltip", { id: activeThread.remoteSessionId })}
+                    >
+                      {t("header.resumableBadge")}
                     </span>
                   )
                 )}
                 {activeCatalog?.tierName && <span className="badge">{activeCatalog.tierName}</span>}
-                <span className="badge green">Offloaded: {offloadPct}%</span>
+                <span className="badge green">{t("header.offloaded", { pct: offloadPct })}</span>
               </div>
             </header>
 
@@ -539,7 +596,7 @@ export function App() {
                   return (
                     <div key={b.id} className="msg user">
                       <div className="msg-label">
-                        You
+                        {t("feed.you")}
                         {typeof b.payload.model === "string" && (
                           <span className="badge">{b.payload.model}</span>
                         )}
@@ -554,7 +611,7 @@ export function App() {
                 if (b.kind === "thought_delta") {
                   return (
                     <details key={b.id} className="thought-box">
-                      <summary>Thinking Process</summary>
+                      <summary>{t("feed.thinking")}</summary>
                       <pre className="msg-text">{b.text}</pre>
                     </details>
                   );
@@ -562,7 +619,7 @@ export function App() {
                 if (b.kind === "text_delta") {
                   return (
                     <div key={b.id} className="msg assistant">
-                      <div className="msg-label">{activeProfile?.name ?? "Agent"}</div>
+                      <div className="msg-label">{activeProfile?.name ?? t("feed.agent")}</div>
                       <pre className="msg-text">{b.text}</pre>
                     </div>
                   );
@@ -572,7 +629,7 @@ export function App() {
                     <div key={b.id} className="subagent-card">
                       <div className="subagent-head">
                         <span>
-                          Subagent: <strong>{String(b.payload.subagentName)}</strong>
+                          {t("feed.subagent")} <strong>{String(b.payload.subagentName)}</strong>
                         </span>
                         <span className="badge">
                           {String(b.payload.profileId ?? "")} · {String(b.payload.model ?? "default")} ·{" "}
@@ -581,7 +638,9 @@ export function App() {
                       </div>
                       {b.kind === "subagent_completed" && (
                         <div className="muted-sm">
-                          Completed · offloaded ~{String(b.payload.offloadedTokens ?? 0)} tokens
+                          {t("feed.subagentCompleted", {
+                            tokens: String(b.payload.offloadedTokens ?? 0),
+                          })}
                         </div>
                       )}
                     </div>
@@ -590,7 +649,9 @@ export function App() {
                 if (b.kind === "error") {
                   return (
                     <div key={b.id} className="msg error">
-                      Error: {String(b.payload.message ?? "Unknown error")}
+                      {t("feed.error", {
+                        msg: String(b.payload.message ?? t("feed.unknownError")),
+                      })}
                     </div>
                   );
                 }
@@ -601,7 +662,7 @@ export function App() {
               {state.pendingApprovals.map((req) => (
                 <div key={req.id} className="approval-card">
                   <div className="approval-head">
-                    <strong>Approval Required: {req.toolName}</strong>
+                    <strong>{t("approval.title", { tool: req.toolName })}</strong>
                     <span className="badge">{req.target}</span>
                   </div>
                   <div className="muted-sm">{req.summary}</div>
@@ -609,13 +670,13 @@ export function App() {
                   {req.diff && <pre className="diff-block">{req.diff}</pre>}
                   <div className="approval-actions">
                     <button className="btn primary sm" onClick={() => void handleApproval(req.id, true, "once")}>
-                      Allow Once
+                      {t("approval.allowOnce")}
                     </button>
                     <button className="btn sm" onClick={() => void handleApproval(req.id, true, "session")}>
-                      Allow Session
+                      {t("approval.allowSession")}
                     </button>
                     <button className="btn danger sm" onClick={() => void handleApproval(req.id, false)}>
-                      Deny
+                      {t("approval.deny")}
                     </button>
                   </div>
                 </div>
@@ -624,7 +685,7 @@ export function App() {
             </div>
 
             {compareThreadId && (() => {
-              const cmpThread = state.threads.find((t) => t.id === compareThreadId);
+              const cmpThread = state.threads.find((th) => th.id === compareThreadId);
               const cmpEvents = eventsByThread[compareThreadId] ?? [];
               const cmpBlocks: Array<{ id: number; kind: string; text: string }> = [];
               for (const ev of cmpEvents) {
@@ -638,12 +699,18 @@ export function App() {
               return (
                 <div className="feed compare-pane">
                   <div className="section-head">
-                    <span>COMPARE: {cmpThread?.title} ({cmpThread?.profileId}@{cmpThread?.hostId})</span>
+                    <span>
+                      {t("feed.compare", {
+                        title: cmpThread?.title ?? "",
+                        profile: cmpThread?.profileId ?? "",
+                        host: cmpThread?.hostId ?? "",
+                      })}
+                    </span>
                     <button className="btn ghost xs" onClick={() => setCompareThreadId(null)}>×</button>
                   </div>
                   {cmpBlocks.map((cb) => (
                     <div key={cb.id} className={`msg ${cb.kind === "user_message" ? "user" : "assistant"}`}>
-                      <div className="msg-label">{cb.kind === "user_message" ? "You" : cmpThread?.profileId}</div>
+                      <div className="msg-label">{cb.kind === "user_message" ? t("feed.you") : cmpThread?.profileId}</div>
                       <pre className="msg-text">{cb.text}</pre>
                     </div>
                   ))}
@@ -656,8 +723,10 @@ export function App() {
             {showSubagentDrawer && (
               <div className="subagent-drawer">
                 <div className="section-head">
-                  <span>PER-TASK SUBAGENT MODEL & EFFORT OVERRIDES</span>
-                  <button className="btn ghost xs" onClick={() => setShowSubagentDrawer(false)}>Close</button>
+                  <span>{t("drawer.title")}</span>
+                  <button className="btn ghost xs" onClick={() => setShowSubagentDrawer(false)}>
+                    {t("drawer.close")}
+                  </button>
                 </div>
                 {state.blueprints.map((bp) => {
                   const ov = subagentOverrides[bp.name] ?? {
@@ -694,7 +763,7 @@ export function App() {
                           update({ profileId: e.target.value || undefined, hostId: p?.hostId });
                         }}
                       >
-                        <option value="">Same as Main</option>
+                        <option value="">{t("drawer.sameAsMain")}</option>
                         {state.profiles.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name} ({p.agent}@{p.hostId})
@@ -703,7 +772,7 @@ export function App() {
                       </select>
                       <input
                         list={`models-${bp.name}`}
-                        placeholder="Model ID (e.g. deepseek/deepseek-4.1-flash)"
+                        placeholder={t("drawer.modelPlaceholder")}
                         value={ov.model ?? ""}
                         onChange={(e) => update({ model: e.target.value || undefined })}
                       />
@@ -730,7 +799,7 @@ export function App() {
             <div className="composer">
               <textarea
                 rows={3}
-                placeholder="Describe your task... (Ctrl/Cmd + Enter to send)"
+                placeholder={t("composer.placeholder")}
                 value={promptText}
                 onChange={(e) => setPromptText(e.target.value)}
                 onKeyDown={(e) => {
@@ -744,7 +813,7 @@ export function App() {
                 <select
                   value={selectedProfileId}
                   onChange={(e) => setSelectedProfileId(e.target.value)}
-                  title="Target Remote Host & Agent Profile"
+                  title={t("composer.profileTooltip")}
                 >
                   {state.profiles.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -756,7 +825,11 @@ export function App() {
                 <input
                   list="main-model-list"
                   className="model-input"
-                  placeholder={activeCatalog ? `Select model (${activeCatalog.models.length} live)` : "Model ID (auto)"}
+                  placeholder={
+                    activeCatalog
+                      ? t("composer.modelLive", { count: activeCatalog.models.length })
+                      : t("composer.modelAuto")
+                  }
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.target.value)}
                 />
@@ -769,18 +842,20 @@ export function App() {
                 <select
                   value={selectedEffort}
                   onChange={(e) => setSelectedEffort(e.target.value as ThinkingEffort)}
-                  title="Main Agent Thinking Effort"
+                  title={t("composer.effortTooltip")}
                 >
                   {availableEfforts.map((ef) => (
-                    <option key={ef} value={ef}>Effort: {ef}</option>
+                    <option key={ef} value={ef}>
+                      {t("composer.effortLabel", { level: ef })}
+                    </option>
                   ))}
                 </select>
 
                 <select value={selectedMode} onChange={(e) => setSelectedMode(e.target.value)}>
-                  <option value="default">Ask</option>
-                  <option value="accept-edits">Accept Edits</option>
-                  <option value="auto">Auto</option>
-                  <option value="plan">Plan (Read-Only)</option>
+                  <option value="default">{t("composer.modeAsk")}</option>
+                  <option value="accept-edits">{t("composer.modeAcceptEdits")}</option>
+                  <option value="auto">{t("composer.modeAuto")}</option>
+                  <option value="plan">{t("composer.modePlan")}</option>
                 </select>
 
                 <label className="check">
@@ -789,11 +864,11 @@ export function App() {
                     checked={quotaSaver}
                     onChange={(e) => setQuotaSaver(e.target.checked)}
                   />
-                  <span>Quota-Saver</span>
+                  <span>{t("composer.quotaSaver")}</span>
                 </label>
 
                 <button className="btn ghost sm" onClick={() => setShowSubagentDrawer((v) => !v)}>
-                  Subagents ⚙
+                  {t("composer.subagents")}
                 </button>
 
                 {activeThread.status === "running" ? (
@@ -801,11 +876,11 @@ export function App() {
                     className="btn danger sm"
                     onClick={() => void api(`/api/threads/${activeThread.id}/cancel`, { method: "POST" })}
                   >
-                    Cancel
+                    {t("composer.cancel")}
                   </button>
                 ) : (
                   <button className="btn primary sm" onClick={() => void handleSendPrompt()}>
-                    Send
+                    {t("composer.send")}
                   </button>
                 )}
               </div>
@@ -818,23 +893,23 @@ export function App() {
       <aside className="inspector">
         <div className="tabs">
           <button className={inspectorTab === "diff" ? "active" : ""} onClick={() => setInspectorTab("diff")}>
-            Diff ({diffState.files.length})
+            {t("inspector.tabDiff", { count: diffState.files.length })}
           </button>
           <button className={inspectorTab === "terminal" ? "active" : ""} onClick={() => setInspectorTab("terminal")}>
-            Terminal
+            {t("inspector.tabTerminal")}
           </button>
           <button className={inspectorTab === "quota" ? "active" : ""} onClick={() => setInspectorTab("quota")}>
-            Quota
+            {t("inspector.tabQuota")}
           </button>
         </div>
 
         {inspectorTab === "diff" && (
           <div className="inspector-body">
             <div className="section-head">
-              <span>CHANGED FILES</span>
+              <span>{t("inspector.changedFiles")}</span>
               {activeThreadId && (
                 <button className="btn ghost xs" onClick={() => void refreshDiff(activeThreadId)}>
-                  Refresh ↻
+                  {t("inspector.refresh")}
                 </button>
               )}
             </div>
@@ -844,11 +919,11 @@ export function App() {
                 <span>{f.path}</span>
               </div>
             ))}
-            <pre className="diff-block">{diffState.diff || "(Working tree clean)"}</pre>
+            <pre className="diff-block">{diffState.diff || t("inspector.cleanTree")}</pre>
             {activeThreadId && diffState.files.length > 0 && (
               <div className="commit-box">
                 <input
-                  placeholder="Commit message..."
+                  placeholder={t("inspector.commitPlaceholder")}
                   value={commitMsg}
                   onChange={(e) => setCommitMsg(e.target.value)}
                 />
@@ -858,17 +933,17 @@ export function App() {
                     try {
                       const r = await api<{ sha: string }>(`/api/threads/${activeThreadId}/commit`, {
                         method: "POST",
-                        body: JSON.stringify({ message: commitMsg || "feat: agent-remote update" }),
+                        body: JSON.stringify({ message: commitMsg || t("inspector.defaultCommitMsg") }),
                       });
                       setCommitMsg("");
-                      notify(`Committed ${r.sha}`);
+                      notify(t("toast.committed", { sha: r.sha }));
                       void refreshDiff(activeThreadId);
                     } catch (e) {
-                      notify(`Commit failed: ${(e as Error).message}`);
+                      notify(t("toast.commitFailed", { msg: (e as Error).message }));
                     }
                   }}
                 >
-                  Commit
+                  {t("inspector.commit")}
                 </button>
               </div>
             )}
@@ -878,7 +953,7 @@ export function App() {
         {inspectorTab === "terminal" && (
           <div className="inspector-body">
             <pre className="code-block">
-              {(activeThreadId && terminalByThread[activeThreadId]) || "(No local command output yet)"}
+              {(activeThreadId && terminalByThread[activeThreadId]) || t("inspector.noTerminal")}
             </pre>
           </div>
         )}
@@ -886,20 +961,20 @@ export function App() {
         {inspectorTab === "quota" && (
           <div className="inspector-body">
             <div className="section-head">
-              <span>REMOTE AGENT REMAINING QUOTA</span>
+              <span>{t("inspector.remoteQuota")}</span>
               {activeProfile && (
                 <button
                   className="btn ghost xs"
                   onClick={async () => {
                     try {
                       await api(`/api/profiles/${activeProfile.id}/refresh-quota`, { method: "POST" });
-                      notify(`Checked quota for ${activeProfile.name}`);
+                      notify(t("toast.checkedQuota", { name: activeProfile.name }));
                     } catch (e) {
-                      notify(`Quota check failed: ${(e as Error).message}`);
+                      notify(t("toast.quotaFailed", { msg: (e as Error).message }));
                     }
                   }}
                 >
-                  Check ↻
+                  {t("inspector.check")}
                 </button>
               )}
             </div>
@@ -910,7 +985,7 @@ export function App() {
                   )
                 : undefined;
               if (!q) {
-                return <div className="muted-sm">Click "Check ↻" to query remote quota / balance (credentials stay on remote host).</div>;
+                return <div className="muted-sm">{t("inspector.quotaHint")}</div>;
               }
               return (
                 <div className="fleet-card">
@@ -923,12 +998,18 @@ export function App() {
                       <div>
                         <span>{w.label}</span>
                         {w.resetsAt && (
-                          <div className="muted-sm">Resets {w.resetsAt.replace("T", " ").slice(0, 19)}</div>
+                          <div className="muted-sm">
+                            {t("inspector.resets", {
+                              time: w.resetsAt.replace("T", " ").slice(0, 19),
+                            })}
+                          </div>
                         )}
                       </div>
                       <strong>
                         {w.remainingAmount ??
-                          (w.remainingPercent !== undefined ? `${w.remainingPercent.toFixed(0)}% left` : "—")}
+                          (w.remainingPercent !== undefined
+                            ? t("inspector.pctLeft", { pct: w.remainingPercent.toFixed(0) })
+                            : "—")}
                       </strong>
                     </div>
                   ))}
@@ -938,11 +1019,13 @@ export function App() {
             })()}
 
             <div className="section-head" style={{ marginTop: 8 }}>
-              <span>TOKEN USAGE &amp; QUOTA-SAVER</span>
-              <span className="badge">{usage?.exact ? "Exact API" : "Estimated"}</span>
+              <span>{t("inspector.tokenUsageHead")}</span>
+              <span className="badge">
+                {usage?.exact ? t("inspector.exactApi") : t("inspector.estimated")}
+              </span>
             </div>
             <div className="quota-stat">
-              <div>Primary Brain Tokens (In / Out)</div>
+              <div>{t("inspector.primaryTokens")}</div>
               <strong>
                 {mainTotal.toLocaleString()} ({(usage?.mainInputTokens ?? 0).toLocaleString()} /{" "}
                 {(usage?.mainOutputTokens ?? 0).toLocaleString()})
@@ -950,30 +1033,27 @@ export function App() {
             </div>
             {(usage?.mainCachedInputTokens ?? 0) > 0 && (
               <div className="quota-stat">
-                <div>Cached Input Tokens</div>
+                <div>{t("inspector.cachedTokens")}</div>
                 <strong>{(usage?.mainCachedInputTokens ?? 0).toLocaleString()}</strong>
               </div>
             )}
             {(usage?.mainReasoningTokens ?? 0) > 0 && (
               <div className="quota-stat">
-                <div>Reasoning Tokens</div>
+                <div>{t("inspector.reasoningTokens")}</div>
                 <strong>{(usage?.mainReasoningTokens ?? 0).toLocaleString()}</strong>
               </div>
             )}
             {usage?.totalCostUsd !== undefined && (
               <div className="quota-stat">
-                <div>Reported Session Cost</div>
+                <div>{t("inspector.reportedCost")}</div>
                 <strong>${usage.totalCostUsd.toFixed(4)} USD</strong>
               </div>
             )}
             <div className="quota-stat green">
-              <div>Offloaded to Low-Cost Subagents</div>
+              <div>{t("inspector.offloadedTokens")}</div>
               <strong>{offloadedTotal.toLocaleString()} ({offloadPct}%)</strong>
             </div>
-            <div className="muted-sm">
-              Enable <strong>Quota-Saver</strong> and map <code>explorer</code> / <code>implementer</code>{" "}
-              to an OpenCode profile (e.g. <code>deepseek/deepseek-4.1-flash</code>) to maximize closed-source quota savings.
-            </div>
+            <div className="muted-sm">{t("inspector.quotaSaverTip")}</div>
           </div>
         )}
       </aside>
@@ -982,39 +1062,75 @@ export function App() {
       {modal === "host" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Add Remote Host</h3>
-            <label>Host ID<input value={hostDraft.id} onChange={(e) => setHostDraft({ ...hostDraft, id: e.target.value })} /></label>
-            <label>Display Name<input value={hostDraft.name} onChange={(e) => setHostDraft({ ...hostDraft, name: e.target.value })} /></label>
+            <h3>{t("modal.host.title")}</h3>
             <label>
-              Transport
+              {t("modal.host.id")}
+              <input value={hostDraft.id} onChange={(e) => setHostDraft({ ...hostDraft, id: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.host.name")}
+              <input value={hostDraft.name} onChange={(e) => setHostDraft({ ...hostDraft, name: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.host.transport")}
               <select value={hostDraft.transport} onChange={(e) => setHostDraft({ ...hostDraft, transport: e.target.value })}>
-                <option value="tailnet-direct">Tailnet Direct (WSS)</option>
-                <option value="local">Local Machine (Direct)</option>
+                <option value="tailnet-direct">{t("modal.host.transportTailnet")}</option>
+                <option value="tailscale-ssh">{t("modal.host.transportTailscaleSsh")}</option>
+                <option value="openssh">{t("modal.host.transportOpenssh")}</option>
+                <option value="local">{t("modal.host.transportLocal")}</option>
               </select>
             </label>
-            <label>Endpoint URL<input value={hostDraft.endpoint} onChange={(e) => setHostDraft({ ...hostDraft, endpoint: e.target.value })} /></label>
-            <label>
-              Auth Mode
-              <select value={hostDraft.authMode} onChange={(e) => setHostDraft({ ...hostDraft, authMode: e.target.value })}>
-                <option value="tailscale-serve">Tailscale Serve (WhoIs Header)</option>
-                <option value="tailscaled-whois">Tailscaled LocalAPI WhoIs</option>
-                <option value="dev-token">Dev Bearer Token</option>
-              </select>
-            </label>
-            {hostDraft.authMode === "dev-token" && (
-              <label>Bearer Token<input type="password" value={hostDraft.bearerToken} onChange={(e) => setHostDraft({ ...hostDraft, bearerToken: e.target.value })} /></label>
+            {hostDraft.transport === "tailnet-direct" && (
+              <label>
+                {t("modal.host.endpoint")}
+                <input value={hostDraft.endpoint} onChange={(e) => setHostDraft({ ...hostDraft, endpoint: e.target.value })} />
+              </label>
+            )}
+            {(hostDraft.transport === "tailscale-ssh" || hostDraft.transport === "openssh") && (
+              <label>
+                {t("modal.host.sshTarget")}
+                <input
+                  placeholder="dev@us-vps"
+                  value={hostDraft.sshTarget}
+                  onChange={(e) => setHostDraft({ ...hostDraft, sshTarget: e.target.value })}
+                />
+              </label>
+            )}
+            {hostDraft.transport === "tailnet-direct" && (
+              <>
+                <label>
+                  {t("modal.host.authMode")}
+                  <select value={hostDraft.authMode} onChange={(e) => setHostDraft({ ...hostDraft, authMode: e.target.value })}>
+                    <option value="tailscale-serve">{t("modal.host.authServe")}</option>
+                    <option value="tailscaled-whois">{t("modal.host.authWhois")}</option>
+                    <option value="dev-token">{t("modal.host.authToken")}</option>
+                  </select>
+                </label>
+                {hostDraft.authMode === "dev-token" && (
+                  <label>
+                    {t("modal.host.bearerToken")}
+                    <input type="password" value={hostDraft.bearerToken} onChange={(e) => setHostDraft({ ...hostDraft, bearerToken: e.target.value })} />
+                  </label>
+                )}
+              </>
             )}
             <div className="modal-actions">
-              <button className="btn" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
-                  await api("/api/hosts", { method: "POST", body: JSON.stringify(hostDraft) });
+                  await api("/api/hosts", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      ...hostDraft,
+                      sshTarget: hostDraft.sshTarget.trim() || undefined,
+                    }),
+                  });
                   setModal(null);
-                  notify(`Saved host ${hostDraft.name}`);
+                  notify(t("toast.savedHost", { name: hostDraft.name }));
                 }}
               >
-                Save Host
+                {t("modal.host.save")}
               </button>
             </div>
           </div>
@@ -1024,11 +1140,17 @@ export function App() {
       {modal === "profile" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Add Remote Agent Profile</h3>
-            <label>Profile ID<input value={profileDraft.id} onChange={(e) => setProfileDraft({ ...profileDraft, id: e.target.value })} /></label>
-            <label>Name<input value={profileDraft.name} onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} /></label>
+            <h3>{t("modal.profile.title")}</h3>
             <label>
-              Host
+              {t("modal.profile.id")}
+              <input value={profileDraft.id} onChange={(e) => setProfileDraft({ ...profileDraft, id: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.profile.name")}
+              <input value={profileDraft.name} onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.profile.host")}
               <select value={profileDraft.hostId} onChange={(e) => setProfileDraft({ ...profileDraft, hostId: e.target.value })}>
                 {state.hosts.map((h) => (
                   <option key={h.id} value={h.id}>{h.name} ({h.id})</option>
@@ -1036,7 +1158,7 @@ export function App() {
               </select>
             </label>
             <label>
-              Agent CLI
+              {t("modal.profile.agent")}
               <select value={profileDraft.agent} onChange={(e) => setProfileDraft({ ...profileDraft, agent: e.target.value })}>
                 <option value="antigravity">Antigravity CLI (agy)</option>
                 <option value="opencode">OpenCode (opencode)</option>
@@ -1047,19 +1169,25 @@ export function App() {
                 <option value="factory-droid">Factory Droid (droid)</option>
               </select>
             </label>
-            <label>Remote Binary<input value={profileDraft.remoteBin} onChange={(e) => setProfileDraft({ ...profileDraft, remoteBin: e.target.value })} /></label>
-            <label>Default Model (optional)<input value={profileDraft.defaultModel} onChange={(e) => setProfileDraft({ ...profileDraft, defaultModel: e.target.value })} /></label>
+            <label>
+              {t("modal.profile.remoteBin")}
+              <input value={profileDraft.remoteBin} onChange={(e) => setProfileDraft({ ...profileDraft, remoteBin: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.profile.defaultModel")}
+              <input value={profileDraft.defaultModel} onChange={(e) => setProfileDraft({ ...profileDraft, defaultModel: e.target.value })} />
+            </label>
             <div className="modal-actions">
-              <button className="btn" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
                   await api("/api/profiles", { method: "POST", body: JSON.stringify(profileDraft) });
                   setModal(null);
-                  notify(`Saved profile ${profileDraft.name}`);
+                  notify(t("toast.savedProfile", { name: profileDraft.name }));
                 }}
               >
-                Save Profile
+                {t("modal.profile.save")}
               </button>
             </div>
           </div>
@@ -1069,11 +1197,17 @@ export function App() {
       {modal === "thread" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>New Agent Thread</h3>
-            <label>Title<input value={threadDraft.title} onChange={(e) => setThreadDraft({ ...threadDraft, title: e.target.value })} /></label>
-            <label>Local Workspace Path<input value={threadDraft.workspaceRoot} onChange={(e) => setThreadDraft({ ...threadDraft, workspaceRoot: e.target.value })} /></label>
+            <h3>{t("modal.thread.title")}</h3>
             <label>
-              Agent Profile
+              {t("modal.thread.name")}
+              <input value={threadDraft.title} onChange={(e) => setThreadDraft({ ...threadDraft, title: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.thread.workspace")}
+              <input value={threadDraft.workspaceRoot} onChange={(e) => setThreadDraft({ ...threadDraft, workspaceRoot: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.thread.profile")}
               <select value={threadDraft.profileId} onChange={(e) => setThreadDraft({ ...threadDraft, profileId: e.target.value })}>
                 {state.profiles.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.agent}@{p.hostId})</option>
@@ -1086,10 +1220,13 @@ export function App() {
                 checked={threadDraft.createWorktree}
                 onChange={(e) => setThreadDraft({ ...threadDraft, createWorktree: e.target.checked })}
               />
-              <span>Isolate in a new Git Worktree branch</span>
+              <span>{t("modal.thread.worktree")}</span>
             </label>
             {threadDraft.createWorktree && (
-              <label>Branch Name (optional)<input value={threadDraft.branchName} onChange={(e) => setThreadDraft({ ...threadDraft, branchName: e.target.value })} /></label>
+              <label>
+                {t("modal.thread.branch")}
+                <input value={threadDraft.branchName} onChange={(e) => setThreadDraft({ ...threadDraft, branchName: e.target.value })} />
+              </label>
             )}
             <label className="check">
               <input
@@ -1097,19 +1234,19 @@ export function App() {
                 checked={threadDraft.ephemeralRemote}
                 onChange={(e) => setThreadDraft({ ...threadDraft, ephemeralRemote: e.target.checked })}
               />
-              <span>Remote incognito (disable remote CLI session persistence; keep history local only)</span>
+              <span>{t("modal.thread.incognito")}</span>
             </label>
             <div className="modal-actions">
-              <button className="btn" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
                   const prof = state.profiles.find((p) => p.id === threadDraft.profileId);
-                  if (!prof) return notify("Please select an Agent Profile first");
+                  if (!prof) return notify(t("toast.selectProfileFirst"));
                   const r = await api<{ thread: HubStateSnapshot["threads"][number] }>("/api/threads", {
                     method: "POST",
                     body: JSON.stringify({
-                      title: threadDraft.title,
+                      title: threadDraft.title || t("modal.thread.defaultTitle"),
                       workspaceRoot: threadDraft.workspaceRoot,
                       hostId: prof.hostId,
                       profileId: prof.id,
@@ -1123,7 +1260,7 @@ export function App() {
                   setModal(null);
                 }}
               >
-                Create Thread
+                {t("modal.thread.create")}
               </button>
             </div>
           </div>
@@ -1133,11 +1270,17 @@ export function App() {
       {modal === "blueprint" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Subagent Blueprint</h3>
-            <label>Name<input value={blueprintDraft.name} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, name: e.target.value })} /></label>
-            <label>Description<input value={blueprintDraft.description} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, description: e.target.value })} /></label>
+            <h3>{t("modal.blueprint.title")}</h3>
             <label>
-              Execution Mode
+              {t("modal.blueprint.name")}
+              <input value={blueprintDraft.name} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, name: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.blueprint.desc")}
+              <input value={blueprintDraft.description} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, description: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.blueprint.mode")}
               <select
                 value={blueprintDraft.executionMode}
                 onChange={(e) =>
@@ -1147,26 +1290,29 @@ export function App() {
                   })
                 }
               >
-                <option value="auto">Auto (Native or Federated)</option>
-                <option value="federated">Federated (Cross-Agent / Quota-Saver)</option>
-                <option value="native">Native Only</option>
+                <option value="auto">{t("modal.blueprint.modeAuto")}</option>
+                <option value="federated">{t("modal.blueprint.modeFederated")}</option>
+                <option value="native">{t("modal.blueprint.modeNative")}</option>
               </select>
             </label>
             <label>
-              Default Remote Profile
+              {t("modal.blueprint.profile")}
               <select
                 value={blueprintDraft.defaultProfileId}
                 onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultProfileId: e.target.value })}
               >
-                <option value="">Inherit Main Profile</option>
+                <option value="">{t("modal.blueprint.inheritMain")}</option>
                 {state.profiles.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} ({p.agent}@{p.hostId})</option>
                 ))}
               </select>
             </label>
-            <label>Default Model (e.g. deepseek/deepseek-4.1-flash)<input value={blueprintDraft.defaultModel} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultModel: e.target.value })} /></label>
             <label>
-              Default Thinking Effort
+              {t("modal.blueprint.model")}
+              <input value={blueprintDraft.defaultModel} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultModel: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.blueprint.effort")}
               <select
                 value={blueprintDraft.defaultEffort}
                 onChange={(e) => setBlueprintDraft({ ...blueprintDraft, defaultEffort: e.target.value as ThinkingEffort })}
@@ -1176,8 +1322,14 @@ export function App() {
                 ))}
               </select>
             </label>
-            <label>Tools (comma-separated)<input value={blueprintDraft.toolsText} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, toolsText: e.target.value })} /></label>
-            <label>System Prompt<textarea rows={3} value={blueprintDraft.systemPrompt} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, systemPrompt: e.target.value })} /></label>
+            <label>
+              {t("modal.blueprint.tools")}
+              <input value={blueprintDraft.toolsText} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, toolsText: e.target.value })} />
+            </label>
+            <label>
+              {t("modal.blueprint.prompt")}
+              <textarea rows={3} value={blueprintDraft.systemPrompt} onChange={(e) => setBlueprintDraft({ ...blueprintDraft, systemPrompt: e.target.value })} />
+            </label>
             <div className="modal-actions">
               {blueprintDraft.name && state.blueprints.some((b) => b.name === blueprintDraft.name) && (
                 <button
@@ -1185,17 +1337,17 @@ export function App() {
                   onClick={async () => {
                     await api(`/api/subagents/${encodeURIComponent(blueprintDraft.name)}`, { method: "DELETE" });
                     setModal(null);
-                    notify(`Deleted subagent ${blueprintDraft.name}`);
+                    notify(t("toast.deletedSubagent", { name: blueprintDraft.name }));
                   }}
                 >
-                  Delete
+                  {t("modal.blueprint.delete")}
                 </button>
               )}
-              <button className="btn" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
-                  if (!blueprintDraft.name.trim()) return notify("Subagent name is required");
+                  if (!blueprintDraft.name.trim()) return notify(t("toast.subagentNameRequired"));
                   const prof = state.profiles.find((p) => p.id === blueprintDraft.defaultProfileId);
                   await api("/api/subagents", {
                     method: "POST",
@@ -1212,10 +1364,10 @@ export function App() {
                     }),
                   });
                   setModal(null);
-                  notify(`Saved subagent ${blueprintDraft.name}`);
+                  notify(t("toast.savedSubagent", { name: blueprintDraft.name }));
                 }}
               >
-                Save Blueprint
+                {t("modal.blueprint.save")}
               </button>
             </div>
           </div>
