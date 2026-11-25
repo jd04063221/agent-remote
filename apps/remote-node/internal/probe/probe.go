@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,8 +28,103 @@ var defaultAgents = []knownAgent{
 	{kind: "factory-droid", binary: "droid"},
 }
 
-// ResolveBinary locates a CLI binary via PATH and common fallback locations
-// (such as /snap/bin on Ubuntu and /opt/homebrew/bin on macOS when running under systemd/launchd).
+// ExtraSearchPaths returns common CLI installation directories that are often missing
+// from minimal systemd / launchd / non-interactive service PATHs (nvm, volta, fnm, pnpm, bun, Homebrew, Snap, Windows npm).
+func ExtraSearchPaths() []string {
+	var dirs []string
+	home, _ := os.UserHomeDir()
+
+	if runtime.GOOS == "windows" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			dirs = append(dirs, filepath.Join(appData, "npm"))
+		}
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			dirs = append(dirs, filepath.Join(localAppData, "pnpm"))
+		}
+		if progFiles := os.Getenv("ProgramFiles"); progFiles != "" {
+			dirs = append(dirs, filepath.Join(progFiles, "nodejs"))
+		}
+		if home != "" {
+			dirs = append(dirs,
+				filepath.Join(home, ".volta", "bin"),
+				filepath.Join(home, ".bun", "bin"),
+				filepath.Join(home, ".local", "bin"),
+				filepath.Join(home, ".cargo", "bin"),
+			)
+		}
+		return existingDirs(dirs)
+	}
+
+	dirs = append(dirs, "/snap/bin", "/opt/homebrew/bin", "/usr/local/bin")
+	if home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "bin"),
+			filepath.Join(home, ".volta", "bin"),
+			filepath.Join(home, ".bun", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, ".local", "share", "pnpm"),
+			filepath.Join(home, "Library", "pnpm"),
+			filepath.Join(home, ".npm-global", "bin"),
+		)
+		// Discover newest Node version installed by nvm or fnm (descending lexical order)
+		for _, pattern := range []string{
+			filepath.Join(home, ".nvm", "versions", "node", "*", "bin"),
+			filepath.Join(home, ".fnm", "node-versions", "*", "installation", "bin"),
+			filepath.Join(home, ".local", "share", "fnm", "node-versions", "*", "installation", "bin"),
+		} {
+			matches, _ := filepath.Glob(pattern)
+			sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+			dirs = append(dirs, matches...)
+		}
+	}
+	return existingDirs(dirs)
+}
+
+func existingDirs(candidates []string) []string {
+	seen := make(map[string]struct{}, len(candidates))
+	out := make([]string, 0, len(candidates))
+	for _, d := range candidates {
+		if d == "" {
+			continue
+		}
+		if _, dup := seen[d]; dup {
+			continue
+		}
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			seen[d] = struct{}{}
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// AugmentedPath appends discovered ExtraSearchPaths onto an existing PATH without duplicates.
+func AugmentedPath(currentPath string) string {
+	sep := string(os.PathListSeparator)
+	parts := strings.Split(currentPath, sep)
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts)+8)
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	for _, extra := range ExtraSearchPaths() {
+		if _, ok := seen[extra]; !ok {
+			seen[extra] = struct{}{}
+			out = append(out, extra)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+// ResolveBinary locates a CLI binary via PATH and ExtraSearchPaths.
+// On Windows, also checks .exe, .cmd, .bat, and .ps1 extensions when no extension is specified.
 func ResolveBinary(bin string) (string, error) {
 	if p, err := exec.LookPath(bin); err == nil {
 		return p, nil
@@ -36,21 +132,16 @@ func ResolveBinary(bin string) (string, error) {
 	if strings.ContainsAny(bin, `/\`) {
 		return "", exec.ErrNotFound
 	}
-	candidates := []string{
-		"/snap/bin",
-		"/opt/homebrew/bin",
-		"/usr/local/bin",
+	names := []string{bin}
+	if runtime.GOOS == "windows" && filepath.Ext(bin) == "" {
+		names = []string{bin + ".exe", bin + ".cmd", bin + ".bat", bin + ".ps1", bin}
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidates = append(candidates,
-			filepath.Join(home, ".local", "bin"),
-			filepath.Join(home, "bin"),
-		)
-	}
-	for _, dir := range candidates {
-		full := filepath.Join(dir, bin)
-		if info, err := os.Stat(full); err == nil && !info.IsDir() {
-			return full, nil
+	for _, dir := range ExtraSearchPaths() {
+		for _, name := range names {
+			full := filepath.Join(dir, name)
+			if info, err := os.Stat(full); err == nil && !info.IsDir() {
+				return full, nil
+			}
 		}
 	}
 	return "", exec.ErrNotFound

@@ -146,6 +146,11 @@ export interface QuotaSnapshot {
 }
 
 export interface HubStateSnapshot {
+  localEnv?: {
+    defaultWorkspaceRoot: string;
+    platform: string;
+    arch: string;
+  };
   hosts: HostState[];
   profiles: ProfileState[];
   catalogs: CatalogSnapshot[];

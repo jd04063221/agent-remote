@@ -1,18 +1,25 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import {
   AcpRemoteSession,
   buildAntigravitySpawnSpec,
 } from "@agent-remote/driver-antigravity";
 import { buildOpenCodeSpawnSpec } from "@agent-remote/driver-opencode";
-import type { AgentKind, ThinkingEffort } from "@agent-remote/protocol";
+import type {
+  AgentKind,
+  CatalogSnapshot,
+  SpawnSessionPayload,
+  ThinkingEffort,
+} from "@agent-remote/protocol";
 import {
   LocalToolEngine,
   McpJsonRpcHandler,
   PolicyEngine,
   WorkspaceSandbox,
 } from "@agent-remote/tool-plane";
-import { TailnetDirectClient } from "@agent-remote/transport";
+import { TailnetDirectClient, type RemoteSessionChannel } from "@agent-remote/transport";
 
 interface JsonRpcReq {
   jsonrpc: "2.0";
@@ -21,13 +28,56 @@ interface JsonRpcReq {
   params?: Record<string, unknown>;
 }
 
-export interface AcpStdioBridgeOptions {
-  endpoint: string;
-  bearerToken?: string;
-  agent: Extract<AgentKind, "antigravity" | "opencode">;
+/**
+ * Normalizes an ACP `cwd` parameter which may be a filesystem path or a `file://` URI
+ * (common from Zed / JetBrains on Windows, e.g. `file:///C:/Users/dev/repo`).
+ */
+export function normalizeAcpCwd(rawCwd: unknown, fallback = process.cwd()): string {
+  const s = typeof rawCwd === "string" ? rawCwd.trim() : "";
+  if (!s) return fallback;
+  if (s.startsWith("file://")) {
+    try {
+      return fileURLToPath(s);
+    } catch {
+      return fallback;
+    }
+  }
+  return path.resolve(s);
+}
+
+export interface AcpUnifiedSessionAdapter {
+  onEvent(cb: (ev: { type: string; text?: string }) => void): void;
+  prompt(text: string, opts?: { model?: string; effort?: ThinkingEffort }): Promise<unknown>;
+  setConfigOption?: (configId: string, value: string) => Promise<unknown>;
+  cancel(): void;
+  getInitialSessionResult?: () => Record<string, unknown> | undefined;
+}
+
+export type AcpCustomDriverFactory = (params: {
+  agent: AgentKind;
+  sessionId: string;
+  cwd: string;
   remoteBin?: string;
   defaultModel?: string;
   defaultEffort?: ThinkingEffort;
+  client: TailnetDirectClient;
+  toolEngine: LocalToolEngine;
+  mcpHandler: McpJsonRpcHandler;
+}) => Promise<{
+  session: AcpUnifiedSessionAdapter;
+  initialCatalog?: CatalogSnapshot;
+  channel: RemoteSessionChannel;
+}>;
+
+export interface AcpStdioBridgeOptions {
+  endpoint: string;
+  bearerToken?: string;
+  agent: AgentKind;
+  remoteBin?: string;
+  defaultModel?: string;
+  defaultEffort?: ThinkingEffort;
+  /** Optional factory enabling all 7 drivers (injected by `ar acp` CLI via `@agent-remote/hub-server`). */
+  driverFactory?: AcpCustomDriverFactory;
 }
 
 /**
@@ -42,7 +92,16 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
   });
   await client.connect();
 
-  const sessions = new Map<string, AcpRemoteSession>();
+  const sessions = new Map<
+    string,
+    {
+      adapter: AcpUnifiedSessionAdapter;
+      channel: RemoteSessionChannel;
+      model?: string;
+      effort?: ThinkingEffort;
+    }
+  >();
+
   const writeOut = (msg: Record<string, unknown>) => {
     process.stdout.write(JSON.stringify(msg) + "\n");
   };
@@ -73,40 +132,86 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
       }
 
       if (req.method === "session/new") {
-        const cwd = String(req.params?.cwd ?? process.cwd());
+        const cwd = normalizeAcpCwd(req.params?.cwd);
         const localSessionId = `acp_${crypto.randomBytes(4).toString("hex")}`;
         const sandbox = new WorkspaceSandbox({ workspaceRoot: cwd });
         const policy = new PolicyEngine({ mode: "accept-edits" });
         const engine = new LocalToolEngine({ sandbox, policy });
         const mcpHandler = new McpJsonRpcHandler(engine);
 
-        const spawnBuilt =
-          options.agent === "opencode"
-            ? {
-                spawn: buildOpenCodeSpawnSpec({
+        let adapter: AcpUnifiedSessionAdapter;
+        let channel: RemoteSessionChannel;
+        let initialResult: Record<string, unknown> = { sessionId: localSessionId };
+
+        if (options.driverFactory) {
+          const created = await options.driverFactory({
+            agent: options.agent,
+            sessionId: localSessionId,
+            cwd,
+            remoteBin: options.remoteBin,
+            defaultModel: options.defaultModel,
+            defaultEffort: options.defaultEffort,
+            client,
+            toolEngine: engine,
+            mcpHandler,
+          });
+          adapter = created.session;
+          channel = created.channel;
+          const extra = adapter.getInitialSessionResult?.();
+          if (extra) initialResult = { ...extra, sessionId: localSessionId };
+          else if (created.initialCatalog) {
+            initialResult = {
+              sessionId: localSessionId,
+              models: {
+                currentModelId: created.initialCatalog.currentModelId ?? options.defaultModel,
+                availableModels: created.initialCatalog.models.map((m) => ({
+                  modelId: m.id,
+                  name: m.displayName,
+                })),
+              },
+            };
+          }
+        } else {
+          const spawnBuilt: { spawn: SpawnSessionPayload; systemPromptAppend?: string } =
+            options.agent === "opencode"
+              ? {
+                  spawn: buildOpenCodeSpawnSpec({
+                    sessionId: localSessionId,
+                    remoteBin: options.remoteBin,
+                    model: options.defaultModel,
+                  }),
+                }
+              : buildAntigravitySpawnSpec({
                   sessionId: localSessionId,
                   remoteBin: options.remoteBin,
-                  model: options.defaultModel,
-                }),
-                systemPromptAppend: undefined,
-              }
-            : buildAntigravitySpawnSpec({
-                sessionId: localSessionId,
-                remoteBin: options.remoteBin,
-                localWorkspaceRoot: cwd,
-              });
+                  localWorkspaceRoot: cwd,
+                });
 
-        const ch = await client.spawnSession(spawnBuilt.spawn);
-        ch.setMcpHandler((rpcReq) => mcpHandler.handleRpc(rpcReq, { sessionId: localSessionId }));
+          channel = await client.spawnSession(spawnBuilt.spawn);
+          channel.setMcpHandler((rpcReq) =>
+            mcpHandler.handleRpc(rpcReq, { sessionId: localSessionId }),
+          );
 
-        const remoteAcp = new AcpRemoteSession({
-          channel: ch,
-          toolEngine: engine,
-          sessionId: localSessionId,
-          blockRemoteBuiltins: true,
-        });
+          const remoteAcp = new AcpRemoteSession({
+            channel,
+            toolEngine: engine,
+            sessionId: localSessionId,
+            blockRemoteBuiltins: true,
+          });
+          await remoteAcp.initialize();
+          const remoteNew = await remoteAcp.startSession({
+            systemPromptAppend: spawnBuilt.systemPromptAppend,
+          });
+          initialResult = { ...remoteNew, sessionId: localSessionId };
+          adapter = {
+            onEvent: (cb) => remoteAcp.on("event", cb),
+            prompt: (text) => remoteAcp.prompt(text),
+            setConfigOption: (cid, val) => remoteAcp.setConfigOption(cid, val),
+            cancel: () => remoteAcp.cancel(),
+          };
+        }
 
-        remoteAcp.on("event", (ev: { type: string; text?: string }) => {
+        adapter.onEvent((ev) => {
           if (ev.type === "text_delta" || ev.type === "thought_delta") {
             writeOut({
               jsonrpc: "2.0",
@@ -123,19 +228,17 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
           }
         });
 
-        await remoteAcp.initialize();
-        const remoteNew = await remoteAcp.startSession({
-          systemPromptAppend: spawnBuilt.systemPromptAppend,
+        sessions.set(localSessionId, {
+          adapter,
+          channel,
+          model: options.defaultModel,
+          effort: options.defaultEffort,
         });
-        sessions.set(localSessionId, remoteAcp);
 
         writeOut({
           jsonrpc: "2.0",
           id: req.id,
-          result: {
-            ...remoteNew,
-            sessionId: localSessionId,
-          },
+          result: initialResult,
         });
         return;
       }
@@ -144,10 +247,13 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
         const sid = String(req.params?.sessionId ?? "");
         const sess = sessions.get(sid);
         if (!sess) throw new Error(`Unknown session: ${sid}`);
-        const res = await sess.setConfigOption(
-          String(req.params?.configId ?? ""),
-          String(req.params?.value ?? ""),
-        );
+        const configId = String(req.params?.configId ?? "");
+        const value = String(req.params?.value ?? "");
+        if (configId === "model") sess.model = value;
+        if (configId === "thought_level") sess.effort = value as ThinkingEffort;
+        const res = sess.adapter.setConfigOption
+          ? await sess.adapter.setConfigOption(configId, value)
+          : { ok: true };
         writeOut({ jsonrpc: "2.0", id: req.id, result: res });
         return;
       }
@@ -158,14 +264,21 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
         if (!sess) throw new Error(`Unknown session: ${sid}`);
         const items = (req.params?.prompt ?? []) as Array<{ text?: string }>;
         const text = items.map((i) => i.text ?? "").join("\n");
-        const res = await sess.prompt(text);
-        writeOut({ jsonrpc: "2.0", id: req.id, result: res });
+        const res = await sess.adapter.prompt(text, {
+          model: sess.model,
+          effort: sess.effort,
+        });
+        writeOut({
+          jsonrpc: "2.0",
+          id: req.id,
+          result: (res && typeof res === "object" ? res : { stopReason: "end_turn" }),
+        });
         return;
       }
 
       if (req.method === "session/cancel") {
         const sid = String(req.params?.sessionId ?? "");
-        sessions.get(sid)?.cancel();
+        sessions.get(sid)?.adapter.cancel();
         return;
       }
 
@@ -188,6 +301,7 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
   });
 
   rl.on("close", () => {
+    for (const s of sessions.values()) s.channel.kill();
     client.close();
   });
 }

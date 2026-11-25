@@ -5,10 +5,13 @@ import path from "node:path";
 
 let cachedWinShell: string | undefined;
 
+const POWERSHELL_UTF8_PREAMBLE =
+  "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; ";
+
 /**
  * Resolves the local shell binary and arguments for `run_command`:
  * - On Windows (`win32`): uses PowerShell (`pwsh` if available, else `powershell.exe`) with `-NoProfile -NonInteractive -Command`
- *   (or `AGENT_REMOTE_SHELL` if explicitly overridden by the user).
+ *   and forces UTF-8 stdout encoding so Chinese/Unicode output never corrupts under Windows CP936/OEM codepages.
  * - On Linux/macOS: uses `bash -lc`.
  */
 export function resolveLocalShell(
@@ -21,7 +24,10 @@ export function resolveLocalShell(
   if (override) {
     const lower = path.basename(override).toLowerCase();
     if (lower.includes("pwsh") || lower.includes("powershell")) {
-      return { bin: override, args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+      return {
+        bin: override,
+        args: ["-NoProfile", "-NonInteractive", "-Command", POWERSHELL_UTF8_PREAMBLE + command],
+      };
     }
     if (lower === "cmd" || lower === "cmd.exe") {
       return { bin: override, args: ["/d", "/s", "/c", command] };
@@ -48,7 +54,7 @@ export function resolveLocalShell(
         : (cachedWinShell ??= check("pwsh") ? "pwsh" : "powershell.exe");
     return {
       bin: shellBin,
-      args: ["-NoProfile", "-NonInteractive", "-Command", command],
+      args: ["-NoProfile", "-NonInteractive", "-Command", POWERSHELL_UTF8_PREAMBLE + command],
     };
   }
 
@@ -481,7 +487,7 @@ export class LocalToolEngine {
     args: Record<string, unknown>,
     ctx: ToolExecutionContext,
   ): Promise<ToolCallResult> {
-    const pattern = String(args.pattern ?? "**/*");
+    const pattern = String(args.pattern ?? "**/*").replaceAll("\\", "/");
     const maxResults = Math.max(1, Math.min(1000, Number(args.max_results ?? 200)));
 
     const gate = await this.enforcePolicy(ctx.sessionId, "search", "glob", pattern, `Glob ${pattern}`);

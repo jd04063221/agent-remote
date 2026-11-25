@@ -109,7 +109,9 @@ ar --help
 
    > **Ubuntu Snap 隔离环境说明**：若远端 `agy` 是通过 Snap 安装的（`/snap/bin/agy`），`agent-remote-node` 会自动识别 Snap 目标并将每会话隔离目录切换到 Snap 与宿主机共享的目录（优先 `$HOME/snap/antigravity-cli/common/ar-sessions`，否则 `$HOME/agent-remote-sessions`），避免命中 Snap 私有 `/tmp` 隔离问题；也支持通过 `--work-base-dir` 手动指定。
    >
-   > **macOS 远端说明**：推荐使用 `--auth-mode tailscale-serve`；Claude 额度探测已原生兼容 macOS 系统 Keychain（`Claude Code-credentials`），无需明文 `.credentials.json`。
+   > **远端后台环境与 `nvm` / `volta` / API Key**：`agent-remote-node` 会自动扫描 `nvm`、`fnm`、`volta`、`pnpm`、`bun`、Homebrew、Snap、Windows `%APPDATA%\npm` 等常见 CLI 安装目录并补入子进程 `PATH`；若需向后台服务注入 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`、`HTTPS_PROXY` 等环境变量，可直接写入远端 `~/.config/agent-remote/node.env`（自动加载）或通过 `--env-file <path>` 指定。
+   >
+   > **macOS / Windows 远端说明**：均推荐使用 `--auth-mode tailscale-serve`；macOS 远端的 Claude 额度探测已原生支持系统 Keychain；Windows 远端已原生适配 `.cmd` / `.ps1` 包装脚本与 `taskkill /T /F` 进程树清理。
 
 3. **在本地验证连通性**：
    ```bash
@@ -329,7 +331,7 @@ ar chat --no-save
 
 ### 6.3 Zed / JetBrains 编辑器接入（`ar acp`）
 
-`ar acp` 提供标准 ACP v1 stdio 桥接，可直接在 Zed 等支持 ACP 的编辑器中把远端 Agent 当作本地原生 AI 助手使用。
+`ar acp` 提供标准 ACP v1 stdio 桥接，现已支持**全部 7 款 Agent**（并支持直接传 `--profile <id>` 读取 `config.toml` 配置，同时兼容 Windows 编辑器传入的 `file:///` 工作区 URI）。
 
 在 Zed 的 `settings.json` 中添加：
 
@@ -338,13 +340,11 @@ ar chat --no-save
   "agent_servers": {
     "Antigravity (Remote US)": {
       "command": "ar",
-      "args": [
-        "acp",
-        "--endpoint",
-        "wss://us-vps.your-tailnet.ts.net/v1/ws",
-        "--agent",
-        "antigravity"
-      ]
+      "args": ["acp", "--profile", "us-agy"]
+    },
+    "Claude Code (Remote US)": {
+      "command": "ar",
+      "args": ["acp", "--profile", "us-claude"]
     },
     "OpenCode DeepSeek (Remote US)": {
       "command": "ar",

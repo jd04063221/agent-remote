@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import os from "node:os";
 import {
+  describeLocalRuntimeEnv,
   THINKING_EFFORTS,
   type ModelCatalogEntry,
   type QuotaSnapshot,
@@ -59,7 +59,7 @@ export function buildCodexSpawnSpec(options: CodexLaunchOptions): {
 
   const developerInstructions = [
     "[agent-remote: Split-Plane Codex Environment]",
-    `The user's code and shell are on their LOCAL machine (${os.platform()} ${os.arch()}) at: ${options.localWorkspaceRoot}.`,
+    `The user's code and shell are on their LOCAL machine (${describeLocalRuntimeEnv()}) at: ${options.localWorkspaceRoot}.`,
     "Remote server execution is locked down in an empty read-only directory.",
     "NEVER invoke built-in server shell or apply_patch tools; ALWAYS use the provided dynamic/local tools (`read_file`, `edit_file`, `write_file`, `delete_file`, `list_dir`, `glob`, `grep`, `run_command`).",
     options.quotaSaverPrompt ? `\n${options.quotaSaverPrompt}` : undefined,

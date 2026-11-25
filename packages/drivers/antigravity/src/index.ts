@@ -1,5 +1,4 @@
-import os from "node:os";
-import type { SpawnSessionPayload } from "@agent-remote/protocol";
+import { describeLocalRuntimeEnv, type SpawnSessionPayload } from "@agent-remote/protocol";
 
 export interface AgyLaunchOptions {
   sessionId: string;
@@ -19,7 +18,7 @@ export function buildAntigravitySpawnSpec(options: AgyLaunchOptions): {
 } {
   const localEnvPrompt = [
     "[agent-remote: Split-Plane Execution Environment]",
-    `Your workspace files and shell live on the user's LOCAL machine (${os.platform()} ${os.arch()}), NOT on this remote server.`,
+    `Your workspace files and shell live on the user's LOCAL machine (${describeLocalRuntimeEnv()}), NOT on this remote server.`,
     `Local workspace root: ${options.localWorkspaceRoot}`,
     options.localGitBranch ? `Current git branch: ${options.localGitBranch}` : undefined,
     "CRITICAL RULE: Do NOT inspect or modify files on the remote server filesystem.",

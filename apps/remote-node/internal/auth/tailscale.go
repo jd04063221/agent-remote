@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -80,6 +81,9 @@ func (a *Authenticator) verifyTailscaleServe(r *http.Request) (Identity, error) 
 }
 
 func (a *Authenticator) verifyTailscaledWhoIs(r *http.Request) (Identity, error) {
+	if runtime.GOOS == "windows" {
+		return Identity{}, errors.New("tailscaled-whois Unix socket is unsupported on Windows; use --auth-mode tailscale-serve (or dev-token) instead")
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
@@ -100,7 +104,7 @@ func (a *Authenticator) verifyTailscaledWhoIs(r *http.Request) (Identity, error)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return Identity{}, fmt.Errorf("tailscaled whois query failed: %w", err)
+		return Identity{}, fmt.Errorf("tailscaled whois query failed (%w) — on macOS App Store Tailscale or non-standard setups, use --auth-mode tailscale-serve instead", err)
 	}
 	defer resp.Body.Close()
 

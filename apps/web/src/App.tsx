@@ -87,7 +87,7 @@ export function App() {
   });
   const [threadDraft, setThreadDraft] = useState({
     title: "New Task",
-    workspaceRoot: "/root/projects/agent-remote",
+    workspaceRoot: "",
     profileId: "",
     createWorktree: false,
     branchName: "",
@@ -108,7 +108,13 @@ export function App() {
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown };
       if (msg.type === "state_snapshot") {
-        setState(msg.payload as HubStateSnapshot);
+        const snap = msg.payload as HubStateSnapshot;
+        setState(snap);
+        if (snap.localEnv?.defaultWorkspaceRoot) {
+          setThreadDraft((prev) =>
+            prev.workspaceRoot ? prev : { ...prev, workspaceRoot: snap.localEnv!.defaultWorkspaceRoot },
+          );
+        }
       } else if (msg.type === "catalog_updated") {
         const snap = msg.payload as CatalogSnapshot;
         setState((prev) => ({

@@ -30,8 +30,13 @@ export class StdioMcpClient {
 
   constructor(cfg: LocalMcpServerConfig) {
     this.name = cfg.name;
+    // On Windows, `npx` / npm-installed shims are `.cmd` scripts and require shell resolution unless an explicit .exe is given.
+    const needsWinShell =
+      process.platform === "win32" && !cfg.command.toLowerCase().endsWith(".exe");
     this.proc = spawn(cfg.command, cfg.args ?? [], {
       env: { ...process.env, ...(cfg.env ?? {}) },
+      shell: needsWinShell,
+      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.proc.stdout.setEncoding("utf8");
@@ -78,7 +83,14 @@ export class StdioMcpClient {
   }
 
   close(): void {
-    this.proc.kill("SIGTERM");
+    if (process.platform === "win32" && this.proc.pid) {
+      spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else {
+      this.proc.kill("SIGTERM");
+    }
   }
 
   private request(

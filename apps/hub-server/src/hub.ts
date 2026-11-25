@@ -228,6 +228,11 @@ export class AgentRemoteHub {
     });
 
     return {
+      localEnv: {
+        defaultWorkspaceRoot: process.cwd(),
+        platform: process.platform,
+        arch: process.arch,
+      },
       hosts,
       profiles: this.store.listProfiles(),
       catalogs: this.store.listCatalogs(),
@@ -1006,13 +1011,16 @@ export class AgentRemoteHub {
         localMcpPort = started.port;
         mcpToken = started.token;
       }
+      const sshChannel = new SshSessionChannel({
+        sshTarget: host.sshTarget,
+        transport: host.transport,
+        spawnSpec: spec,
+        localMcpPort,
+        mcpBearerToken: mcpToken,
+      });
+      await sshChannel.waitForReady();
       return {
-        channel: new SshSessionChannel({
-          sshTarget: host.sshTarget,
-          spawnSpec: spec,
-          localMcpPort,
-          mcpBearerToken: mcpToken,
-        }),
+        channel: sshChannel,
         localHttpMcp,
       };
     }

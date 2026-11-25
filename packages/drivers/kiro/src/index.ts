@@ -1,5 +1,6 @@
-import type {
-  ModelCatalogEntry,
+import {
+  describeLocalRuntimeEnv,
+  type ModelCatalogEntry,
   SpawnSessionPayload,
   SubagentBlueprint,
   ThinkingEffort,
@@ -60,7 +61,7 @@ export function buildKiroV3ProfileJson(params: {
  */
 export function buildKiroSpawnSpec(options: KiroLaunchOptions): SpawnSessionPayload {
   const mainPrompt = [
-    `Local workspace root on user's workstation: ${options.localWorkspaceRoot}.`,
+    `Local workspace root on user's workstation (${describeLocalRuntimeEnv()}): ${options.localWorkspaceRoot}.`,
     "Use only `@agent_remote_local/*` tools to read, edit, and run commands locally.",
     options.quotaSaverPrompt,
   ]

@@ -183,20 +183,66 @@ async function main(): Promise<void> {
     }
 
     case "acp": {
-      const endpoint = getFlag("--endpoint");
+      const cfg = loadAgentRemoteConfig();
+      const profileKey = getFlag("--profile") ?? cfg.hub.default_profile;
+      const prof = profileKey ? cfg.profiles[profileKey] : undefined;
+      const host = prof ? cfg.hosts[prof.host] : undefined;
+      const endpoint = getFlag("--endpoint") ?? host?.endpoint;
       if (!endpoint) {
         console.error(
-          "Usage: ar acp --endpoint wss://<node>.ts.net/v1/ws [--token ...] [--agent antigravity|opencode]",
+          "Usage: ar acp [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--token ...] [--agent antigravity|opencode|claude|codex|gemini|kiro|factory-droid]",
         );
         process.exit(1);
       }
-      const agent = getFlag("--agent", "antigravity") as "antigravity" | "opencode";
+      const agent = (getFlag("--agent") as AgentKind | undefined) ?? prof?.agent ?? "antigravity";
       await runAcpStdioBridge({
         endpoint,
-        bearerToken: getFlag("--token", process.env.AGENT_REMOTE_DEV_TOKEN),
+        bearerToken: getFlag("--token") ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
         agent,
-        remoteBin: getFlag("--remote-bin"),
-        defaultModel: getFlag("--model"),
+        remoteBin: getFlag("--remote-bin") ?? prof?.remote_bin,
+        defaultModel: getFlag("--model") ?? prof?.default_model,
+        defaultEffort: (getFlag("--effort") as ThinkingEffort | undefined) ?? prof?.default_effort,
+        driverFactory: async (p) => {
+          const built = buildSpawnSpecForAgent({
+            sessionId: p.sessionId,
+            hostId: prof?.host ?? "acp-remote",
+            profileId: profileKey ?? p.agent,
+            agent: p.agent,
+            remoteBin: p.remoteBin,
+            localWorkspaceRoot: p.cwd,
+            model: p.defaultModel,
+            effort: p.defaultEffort,
+            ephemeralRemote: cfg.hub.ephemeral_remote,
+            nativePlans: [],
+          });
+          const ch = await p.client.spawnSession(built.spawn);
+          ch.setMcpHandler((rpcReq) => p.mcpHandler.handleRpc(rpcReq, { sessionId: p.sessionId }));
+          const drv = await attachDriverSession({
+            agent: p.agent,
+            hostId: prof?.host ?? "acp-remote",
+            profileId: profileKey ?? p.agent,
+            sessionId: p.sessionId,
+            channel: ch,
+            toolEngine: p.toolEngine,
+            model: p.defaultModel,
+            effort: p.defaultEffort,
+            ephemeralRemote: cfg.hub.ephemeral_remote,
+            systemPromptAppend: built.systemPromptAppend,
+            developerInstructions: built.developerInstructions,
+          });
+          return {
+            channel: ch,
+            initialCatalog: drv.getInitialCatalog?.(),
+            session: {
+              onEvent: (cb) => drv.onEvent(cb),
+              prompt: async (text, opts) => {
+                await drv.prompt(text, opts);
+                return { stopReason: "end_turn" };
+              },
+              cancel: () => drv.cancel(),
+            },
+          };
+        },
       });
       break;
     }

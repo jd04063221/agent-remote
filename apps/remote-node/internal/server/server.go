@@ -77,6 +77,9 @@ func (s *managedSession) emit(f protocol.Frame) {
 }
 
 func (s *managedSession) cleanup() {
+	if s.cmd != nil {
+		killProcTree(s.cmd)
+	}
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
@@ -376,9 +379,11 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 		expandedArgs[i] = replacer.Replace(a)
 	}
 
-	cmd := exec.CommandContext(sessCtx, resolvedCmd, expandedArgs...)
+	execBin, execArgs := prepareExecCommand(runtime.GOOS, resolvedCmd, expandedArgs)
+	cmd := exec.CommandContext(sessCtx, execBin, execArgs...)
+	configureProcGroup(cmd)
 	cmd.Dir = emptyDir
-	env := append([]string{}, os.Environ()...)
+	env := buildAugmentedEnv(os.Environ())
 	env = append(env, "AGENT_REMOTE_SESSION_ID="+req.SessionID)
 	env = append(env, "AGENT_REMOTE_WORKDIR="+workdir)
 	if sess.mcpBridge != nil {
@@ -673,4 +678,53 @@ func resolveWorkBaseDir(configuredBase, resolvedCmd, agent string) (string, erro
 		return "", err
 	}
 	return dir, nil
+}
+
+// prepareExecCommand adapts remote CLI invocation for Windows .ps1 and .cmd/.bat wrappers:
+// - .ps1 scripts are launched via PowerShell (`pwsh` or `powershell.exe -NoProfile -ExecutionPolicy Bypass -File`).
+// - .cmd/.bat shims (e.g. npm-installed claude.cmd) have raw newlines in arguments flattened so cmd.exe does not truncate them.
+func prepareExecCommand(goos, resolvedCmd string, args []string) (string, []string) {
+	if goos != "windows" {
+		return resolvedCmd, args
+	}
+	lower := strings.ToLower(resolvedCmd)
+	if strings.HasSuffix(lower, ".ps1") {
+		ps := "powershell.exe"
+		if p, err := exec.LookPath("pwsh"); err == nil {
+			ps = p
+		}
+		wrapped := make([]string, 0, len(args)+5)
+		wrapped = append(wrapped, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolvedCmd)
+		wrapped = append(wrapped, args...)
+		return ps, wrapped
+	}
+	if strings.HasSuffix(lower, ".cmd") || strings.HasSuffix(lower, ".bat") {
+		safe := make([]string, len(args))
+		for i, a := range args {
+			a = strings.ReplaceAll(a, "\r\n", " ")
+			a = strings.ReplaceAll(a, "\n", " ")
+			a = strings.ReplaceAll(a, "\r", " ")
+			safe[i] = a
+		}
+		return resolvedCmd, safe
+	}
+	return resolvedCmd, args
+}
+
+func buildAugmentedEnv(base []string) []string {
+	out := make([]string, 0, len(base)+1)
+	foundPath := false
+	for _, entry := range base {
+		if idx := strings.IndexByte(entry, '='); idx > 0 && strings.EqualFold(entry[:idx], "PATH") {
+			key := entry[:idx]
+			out = append(out, key+"="+probe.AugmentedPath(entry[idx+1:]))
+			foundPath = true
+		} else {
+			out = append(out, entry)
+		}
+	}
+	if !foundPath {
+		out = append(out, "PATH="+probe.AugmentedPath(""))
+	}
+	return out
 }

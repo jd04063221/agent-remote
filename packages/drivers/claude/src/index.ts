@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import os from "node:os";
-import type {
-  ModelCatalogEntry,
+import {
+  describeLocalRuntimeEnv,
+  type ModelCatalogEntry,
   SpawnSessionPayload,
   SubagentBlueprint,
   ThinkingEffort,
@@ -94,7 +94,7 @@ export function buildClaudeSpawnSpec(options: ClaudeLaunchOptions): SpawnSession
 
   const sysPrompt = [
     "[agent-remote: Split-Plane Claude Code Environment]",
-    `The user's repository lives on their LOCAL machine (${os.platform()} ${os.arch()}), NOT on this server.`,
+    `The user's repository lives on their LOCAL machine (${describeLocalRuntimeEnv()}), NOT on this server.`,
     `Local workspace root: ${options.localWorkspaceRoot}`,
     options.localGitBranch ? `Git branch: ${options.localGitBranch}` : undefined,
     "Built-in server file/shell tools are disabled. Use `mcp__agent_remote_local__*` tools for all file and shell actions.",

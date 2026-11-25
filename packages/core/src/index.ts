@@ -197,6 +197,8 @@ export function formatLocalHistoryContext(
   ].join("\n");
 }
 
+export { describeLocalRuntimeEnv } from "@agent-remote/protocol";
+
 export interface AgentProbeReport {
   agent: AgentKind;
   installed: boolean;

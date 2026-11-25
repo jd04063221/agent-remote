@@ -6,6 +6,7 @@ import type { RemoteSessionChannel } from "./tailnet-client.js";
 
 export interface SshChannelOptions {
   sshTarget: string;
+  transport?: "tailscale-ssh" | "openssh";
   sshArgs?: string[];
   spawnSpec: SpawnSessionPayload;
   /** Local loopback HTTP MCP server port to expose to the remote CLI via `ssh -R`. */
@@ -15,12 +16,14 @@ export interface SshChannelOptions {
 }
 
 /**
- * Strips MOTD / .bashrc banners emitted on stdout prior to the exact sentinel marker line.
+ * Strips MOTD / .bashrc banners emitted on stdout prior to the exact sentinel marker line,
+ * and extracts the optional `__AR_WORKDIR__=<path>` metadata line emitted right before the sentinel.
  */
 export class MotdSentinelFilter {
   private readonly sentinel: string;
   private unlocked = false;
   private buffer = "";
+  private discoveredWorkdir?: string;
 
   constructor(sentinel: string) {
     this.sentinel = sentinel;
@@ -30,14 +33,24 @@ export class MotdSentinelFilter {
     return this.unlocked;
   }
 
+  getDiscoveredWorkdir(): string | undefined {
+    return this.discoveredWorkdir;
+  }
+
   push(chunk: string): string {
     if (this.unlocked) return chunk;
     this.buffer += chunk;
-    const marker = `${this.sentinel}\n`;
-    const idx = this.buffer.indexOf(marker);
-    if (idx === -1) return "";
+    const match = new RegExp(`${escapeRegExp(this.sentinel)}\\r?\\n`).exec(this.buffer);
+    if (!match || match.index === undefined) return "";
+
+    const pre = this.buffer.slice(0, match.index);
+    const wdMatch = /__AR_WORKDIR__=([^\r\n]+)/.exec(pre);
+    if (wdMatch?.[1]) {
+      this.discoveredWorkdir = wdMatch[1].trim();
+    }
+
     this.unlocked = true;
-    const rest = this.buffer.slice(idx + marker.length);
+    const rest = this.buffer.slice(match.index + match[0].length);
     this.buffer = "";
     return rest;
   }
@@ -45,10 +58,11 @@ export class MotdSentinelFilter {
 
 /**
  * Builds a POSIX `sh -c` wrapper that:
- * 1. Creates an isolated `/tmp/ar-<sid>/empty` workspace (chmod 700)
- * 2. Registers an EXIT/INT/TERM trap to guarantee zero remote leftovers
- * 3. Materializes any ephemeral files cleanly via base64 (safe against quoting/newlines)
- * 4. Prints the MOTD sentinel right before `exec`ing the target CLI.
+ * 1. Detects Snap-confined CLIs (`/snap/bin/*`) and uses a Snap-shared base directory instead of `/tmp`
+ * 2. Creates an isolated `$BASE/ar-ssh-<sid>/empty` workspace (chmod 700)
+ * 3. Registers an EXIT/INT/TERM trap to guarantee zero remote leftovers
+ * 4. Materializes any ephemeral files cleanly via base64 (safe against quoting/newlines)
+ * 5. Emits `__AR_WORKDIR__=<actual path>` + MOTD sentinel right before `exec`ing the target CLI.
  */
 export function buildSshRemoteWrapperCommand(params: {
   sentinel: string;
@@ -61,9 +75,16 @@ export function buildSshRemoteWrapperCommand(params: {
       .replaceAll("{{MCP_URL}}", params.mcpUrl ?? "")
       .replaceAll("{{MCP_TOKEN}}", params.mcpToken ?? "");
 
+  const safeSid = params.spec.sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const cmdName = params.spec.command;
+
   const lines: string[] = [
     "set -eu",
-    `WORKDIR="/tmp/ar-ssh-$$-${params.spec.sessionId.replace(/[^a-zA-Z0-9_-]/g, "")}"`,
+    'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/snap/bin:$PATH"',
+    `RESOLVED_CMD="$(command -v '${shellEscape(cmdName)}' 2>/dev/null || printf '%s' '${shellEscape(cmdName)}')"`,
+    'BASE_DIR="/tmp"',
+    'case "$RESOLVED_CMD" in /snap/*|/var/lib/snapd/snap/*) if [ -d "$HOME/snap/antigravity-cli/common" ]; then BASE_DIR="$HOME/snap/antigravity-cli/common/ar-sessions"; else BASE_DIR="$HOME/agent-remote-sessions"; fi ;; esac',
+    `WORKDIR="$BASE_DIR/ar-ssh-${safeSid}"`,
     'mkdir -p "$WORKDIR/empty" && chmod 700 "$WORKDIR"',
     'trap \'rm -rf "$WORKDIR"\' EXIT INT TERM HUP',
   ];
@@ -94,6 +115,7 @@ export function buildSshRemoteWrapperCommand(params: {
     .join(" ");
 
   lines.push(`cd "$WORKDIR/empty"`);
+  lines.push(`printf '__AR_WORKDIR__=%s\\n' "$WORKDIR/empty"`);
   lines.push(`printf '%s\\n' '${params.sentinel}'`);
   lines.push(`exec ${escapedCmd}`);
 
@@ -103,24 +125,41 @@ export function buildSshRemoteWrapperCommand(params: {
 /**
  * Zero-install OpenSSH / Tailscale SSH session channel (`ssh -T`) with MOTD sentinel framing
  * and optional `-R` reverse tunnel pointing back to the local `LocalHttpMcpServer`.
+ * Note: Tailscale SSH natively intercepts standard `ssh` client connections over Tailnet MagicDNS/IP
+ * without SSH keys while preserving OpenSSH `-R` reverse port forwarding (`ExitOnForwardFailure=yes`).
  */
 export class SshSessionChannel extends EventEmitter implements RemoteSessionChannel {
   readonly sessionId: string;
   readonly channel = 1;
-  readonly workdir = "/tmp/ar-ssh/empty";
   readonly mcpEndpointUrl?: string;
   readonly mcpBearerToken?: string;
 
+  private _workdir: string;
   private readonly proc: ChildProcessWithoutNullStreams;
   private readonly filter: MotdSentinelFilter;
+  private readonly readyPromise: Promise<void>;
+  private resolveReady!: () => void;
+  private rejectReady!: (err: Error) => void;
+
+  get workdir(): string {
+    return this._workdir;
+  }
 
   constructor(options: SshChannelOptions) {
     super();
     this.sessionId = options.spawnSpec.sessionId;
+    const safeSid = this.sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
+    this._workdir = `/tmp/ar-ssh-${safeSid}/empty`;
+
     const sentinel = `__AR_READY_${crypto.randomBytes(8).toString("hex")}__`;
     this.filter = new MotdSentinelFilter(sentinel);
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
 
-    const remotePort = options.remoteMcpPort ?? (options.localMcpPort ? 28000 + (crypto.randomInt(10000)) : undefined);
+    const remotePort =
+      options.remoteMcpPort ?? (options.localMcpPort ? 28000 + crypto.randomInt(10000) : undefined);
     if (options.localMcpPort && remotePort) {
       this.mcpEndpointUrl = `http://127.0.0.1:${remotePort}/mcp`;
       this.mcpBearerToken = options.mcpBearerToken;
@@ -134,11 +173,19 @@ export class SshSessionChannel extends EventEmitter implements RemoteSessionChan
       "ServerAliveInterval=15",
       "-o",
       "ServerAliveCountMax=3",
+      ...(options.transport === "tailscale-ssh"
+        ? ["-o", "StrictHostKeyChecking=accept-new"]
+        : []),
       ...(options.sshArgs ?? []),
     ];
 
     if (options.localMcpPort && remotePort) {
-      sshArgs.push("-R", `127.0.0.1:${remotePort}:127.0.0.1:${options.localMcpPort}`);
+      sshArgs.push(
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-R",
+        `127.0.0.1:${remotePort}:127.0.0.1:${options.localMcpPort}`,
+      );
     }
 
     const remoteScript = buildSshRemoteWrapperCommand({
@@ -154,14 +201,45 @@ export class SshSessionChannel extends EventEmitter implements RemoteSessionChan
     this.proc.stdout.setEncoding("utf8");
     this.proc.stderr.setEncoding("utf8");
 
+    let stderrBuf = "";
     this.proc.stdout.on("data", (chunk: string) => {
+      const wasUnlocked = this.filter.isUnlocked();
       const clean = this.filter.push(chunk);
+      if (!wasUnlocked && this.filter.isUnlocked()) {
+        const discovered = this.filter.getDiscoveredWorkdir();
+        if (discovered) this._workdir = discovered;
+        this.resolveReady();
+      }
       if (clean) this.emit("stdout", clean);
     });
-    this.proc.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
+    this.proc.stderr.on("data", (chunk: string) => {
+      if (!this.filter.isUnlocked() && stderrBuf.length < 2048) stderrBuf += chunk;
+      this.emit("stderr", chunk);
+    });
+    this.proc.on("error", (err) => {
+      if (!this.filter.isUnlocked()) this.rejectReady(err);
+    });
     this.proc.on("close", (code) => {
+      if (!this.filter.isUnlocked()) {
+        this.rejectReady(
+          new Error(
+            `SSH remote session exited (code ${code ?? -1}) before ready (note: zero-install SSH requires POSIX sh on the remote host; for remote Windows hosts use tailnet-direct agent-remote-node). ${stderrBuf.trim()}`,
+          ),
+        );
+      }
       this.emit("exit", { sessionId: this.sessionId, exitCode: code ?? 0 });
     });
+  }
+
+  /** Waits until the remote SSH wrapper prints the MOTD sentinel and synchronizes the actual remote workdir. */
+  async waitForReady(timeoutMs = 15_000): Promise<void> {
+    if (this.filter.isUnlocked()) return;
+    await Promise.race([
+      this.readyPromise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`SSH channel ready timed out after ${timeoutMs}ms`)), timeoutMs).unref(),
+      ),
+    ]);
   }
 
   writeStdin(data: string): void {
@@ -179,4 +257,8 @@ export class SshSessionChannel extends EventEmitter implements RemoteSessionChan
 
 function shellEscape(s: string): string {
   return s.replaceAll("'", "'\\''");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
