@@ -50,5 +50,6 @@ pnpm --filter @agent-remote/desktop start
 
 ## 文档
 
-- 📘 **详细使用说明（安装、部署、配置、7 款 Agent、Quota-Saver、发版与 FAQ）**：[docs/usage.md](docs/usage.md)
+- 🚀 **远端节点部署与 Tailscale Tailnet 接入指南（Linux / Snap / macOS / Windows）**：[docs/tailscale-deploy.md](docs/tailscale-deploy.md)
+- 📘 **详细使用说明（安装、配置、7 款 Agent、Quota-Saver、发版与 FAQ）**：[docs/usage.md](docs/usage.md)
 - 🏗️ **完整系统架构设计文档**：[docs/architecture.md](docs/architecture.md)

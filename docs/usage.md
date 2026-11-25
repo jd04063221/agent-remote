@@ -82,6 +82,8 @@ ar --help
 
 ## 3. 远端节点部署（三种连接模式）
 
+> 💡 如需手把手的 **Linux (`systemd` + Ubuntu Snap) / macOS (`launchd`) / Windows (PowerShell) + Tailscale Serve** 完整部署与联调实操步骤，请直接查看专项指南：**[tailscale-deploy.md](tailscale-deploy.md)**。
+
 ### 模式一：Tailscale Serve 零信任直连（强烈推荐）
 
 无需开放任何公网端口，无需管理 Token，利用 Tailscale 自动签发 HTTPS 证书并注入 `Tailscale-User-Login` 身份头（Go 节点严格校验仅允许 `127.0.0.1` / `::1` 回环代理请求，防止头伪造）。

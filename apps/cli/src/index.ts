@@ -505,7 +505,7 @@ ${xmlExtraArgs ? xmlExtraArgs + "\n" : ""}  </array>
 EOF
 launchctl unload "$HOME/Library/LaunchAgents/io.agent-remote.node.plist" 2>/dev/null || true
 launchctl load -w "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
-${auth === "tailscale-serve" ? `tailscale serve --bg https / http://127.0.0.1:${port}` : "# Listening without tailscale serve"}
+${auth === "tailscale-serve" ? `tailscale serve --bg http://127.0.0.1:${port}` : "# Listening without tailscale serve"}
 echo "Done! Connect via wss://<your-mac>.<your-tailnet>.ts.net/v1/ws"
 `);
           break;
@@ -539,7 +539,7 @@ WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-remote-node
-${auth === "tailscale-serve" ? `sudo tailscale serve --bg https / http://127.0.0.1:${port}` : "# Listening with tailscaled-whois auth"}
+${auth === "tailscale-serve" ? `sudo tailscale serve --bg http://127.0.0.1:${port}` : "# Listening with tailscaled-whois auth"}
 echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
 `);
         break;
