@@ -16,8 +16,10 @@ import type {
 import {
   LocalToolEngine,
   McpJsonRpcHandler,
+  PERMISSION_MODES,
   PolicyEngine,
   WorkspaceSandbox,
+  type PermissionMode,
 } from "@agent-remote/tool-plane";
 import { TailnetDirectClient, type RemoteSessionChannel } from "@agent-remote/transport";
 
@@ -69,6 +71,19 @@ export type AcpCustomDriverFactory = (params: {
   channel: RemoteSessionChannel;
 }>;
 
+export const ACP_PERMISSION_MODES: ReadonlyArray<{
+  id: PermissionMode;
+  name: string;
+  description: string;
+}> = [
+  { id: "plan", name: "Plan (Read-Only)", description: "Workspace read-only; mutations and commands disabled" },
+  { id: "default", name: "Ask (Workspace)", description: "Workspace read allowed; edits, deletes, and commands ask" },
+  { id: "accept-edits", name: "Accept Edits", description: "Workspace edits auto-allowed; deletes and commands ask" },
+  { id: "auto", name: "Workspace Safe Auto", description: "Workspace edits and read-only inspection commands auto-allowed" },
+  { id: "workspace-full", name: "Workspace Full Access", description: "Full read/write/delete/shell/MCP inside workspace sandbox" },
+  { id: "full-access", name: "Full Access (Unrestricted)", description: "Unrestricted local paths, shell commands, and MCP" },
+];
+
 export interface AcpStdioBridgeOptions {
   endpoint: string;
   bearerToken?: string;
@@ -76,6 +91,7 @@ export interface AcpStdioBridgeOptions {
   remoteBin?: string;
   defaultModel?: string;
   defaultEffort?: ThinkingEffort;
+  defaultMode?: PermissionMode;
   /** Optional factory enabling all 7 drivers (injected by `ar acp` CLI via `@agent-remote/hub-server`). */
   driverFactory?: AcpCustomDriverFactory;
 }
@@ -97,6 +113,8 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
     {
       adapter: AcpUnifiedSessionAdapter;
       channel: RemoteSessionChannel;
+      sandbox: WorkspaceSandbox;
+      policy: PolicyEngine;
       model?: string;
       effort?: ThinkingEffort;
     }
@@ -134,8 +152,15 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
       if (req.method === "session/new") {
         const cwd = normalizeAcpCwd(req.params?.cwd);
         const localSessionId = `acp_${crypto.randomBytes(4).toString("hex")}`;
-        const sandbox = new WorkspaceSandbox({ workspaceRoot: cwd });
-        const policy = new PolicyEngine({ mode: "accept-edits" });
+        const initialMode: PermissionMode =
+          options.defaultMode && (PERMISSION_MODES as readonly string[]).includes(options.defaultMode)
+            ? options.defaultMode
+            : "accept-edits";
+        const sandbox = new WorkspaceSandbox({
+          workspaceRoot: cwd,
+          allowOutsideWorkspace: initialMode === "full-access",
+        });
+        const policy = new PolicyEngine({ mode: initialMode });
         const engine = new LocalToolEngine({ sandbox, policy });
         const mcpHandler = new McpJsonRpcHandler(engine);
 
@@ -231,6 +256,8 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
         sessions.set(localSessionId, {
           adapter,
           channel,
+          sandbox,
+          policy,
           model: options.defaultModel,
           effort: options.defaultEffort,
         });
@@ -238,8 +265,30 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
         writeOut({
           jsonrpc: "2.0",
           id: req.id,
-          result: initialResult,
+          result: {
+            ...initialResult,
+            sessionId: localSessionId,
+            modes: {
+              currentModeId: initialMode,
+              availableModes: ACP_PERMISSION_MODES,
+            },
+          },
         });
+        return;
+      }
+
+      if (req.method === "session/set_mode") {
+        const sid = String(req.params?.sessionId ?? "");
+        const sess = sessions.get(sid);
+        if (!sess) throw new Error(`Unknown session: ${sid}`);
+        const modeId = String(req.params?.modeId ?? "");
+        if (!(PERMISSION_MODES as readonly string[]).includes(modeId)) {
+          throw new Error(`Invalid permission mode "${modeId}" (valid: ${PERMISSION_MODES.join("|")})`);
+        }
+        const nextMode = modeId as PermissionMode;
+        sess.policy.setMode(nextMode);
+        sess.sandbox.setAllowOutsideWorkspace(nextMode === "full-access");
+        writeOut({ jsonrpc: "2.0", id: req.id, result: { modeId: nextMode } });
         return;
       }
 
@@ -249,6 +298,16 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
         if (!sess) throw new Error(`Unknown session: ${sid}`);
         const configId = String(req.params?.configId ?? "");
         const value = String(req.params?.value ?? "");
+        if (configId === "mode") {
+          if (!(PERMISSION_MODES as readonly string[]).includes(value)) {
+            throw new Error(`Invalid permission mode "${value}" (valid: ${PERMISSION_MODES.join("|")})`);
+          }
+          const nextMode = value as PermissionMode;
+          sess.policy.setMode(nextMode);
+          sess.sandbox.setAllowOutsideWorkspace(nextMode === "full-access");
+          writeOut({ jsonrpc: "2.0", id: req.id, result: { modeId: nextMode } });
+          return;
+        }
         if (configId === "model") sess.model = value;
         if (configId === "thought_level") sess.effort = value as ThinkingEffort;
         const res = sess.adapter.setConfigOption

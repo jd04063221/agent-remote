@@ -128,7 +128,10 @@ export class PolicyEngine {
     if (denyRule) {
       return { decision: "deny", reason: denyRule.reason ?? `Denied by rule ${denyRule.pattern}`, signature };
     }
-    const askRule = matched.find((r) => r.decision === "ask");
+    const askRule =
+      this.mode === "workspace-full" || this.mode === "full-access"
+        ? undefined
+        : matched.find((r) => r.decision === "ask");
     if (askRule) {
       if (this.sessionAllowed.has(signature)) {
         return { decision: "allow", reason: "Approved earlier in this session", signature };

@@ -48,11 +48,19 @@ describe("@agent-remote/tool-plane", () => {
   });
 
   it("supports workspace-full (sandboxed autonomous) and full-access (unrestricted) permission modes", () => {
-    const wsPolicy = new PolicyEngine({ mode: "workspace-full" });
+    const wsPolicy = new PolicyEngine({
+      mode: "workspace-full",
+      rules: [
+        { action: "command", pattern: "pnpm *", decision: "ask" },
+        { action: "write", pattern: "*.secret", decision: "deny", reason: "secret protected" },
+      ],
+    });
     expect(wsPolicy.evaluate("write", "src/index.ts").decision).toBe("allow");
+    expect(wsPolicy.evaluate("write", "prod.secret").decision).toBe("deny");
     expect(wsPolicy.evaluate("delete", "src/old.ts").decision).toBe("allow");
     expect(wsPolicy.evaluate("command", "pnpm test && go test ./...").decision).toBe("allow");
-    expect(wsPolicy.evaluate("mcp", "postgres_query").decision).toBe("allow");
+    expect(wsPolicy.evaluate("command", "python scripts/deploy.py").decision).toBe("allow");
+    expect(wsPolicy.evaluate("mcp", "local_mcp__postgres__query").decision).toBe("allow");
     expect(wsPolicy.evaluate("command", "sudo apt update").decision).toBe("deny");
     expect(wsPolicy.evaluate("command", "rm -rf /").decision).toBe("deny");
 

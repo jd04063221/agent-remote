@@ -206,7 +206,7 @@ async function main(): Promise<void> {
       const endpoint = getFlag("--endpoint") ?? host?.endpoint;
       if (!endpoint) {
         console.error(
-          "Usage: ar acp [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--token ...] [--agent antigravity|opencode|claude|codex|gemini|kiro|factory-droid]",
+          "Usage: ar acp [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--token ...] [--agent antigravity|opencode|claude|codex|gemini|kiro|factory-droid] [--mode plan|default|accept-edits|auto|workspace-full|full-access]",
         );
         process.exit(1);
       }
@@ -218,6 +218,7 @@ async function main(): Promise<void> {
         remoteBin: getFlag("--remote-bin") ?? prof?.remote_bin,
         defaultModel: getFlag("--model") ?? prof?.default_model,
         defaultEffort: (getFlag("--effort") as ThinkingEffort | undefined) ?? prof?.default_effort,
+        defaultMode: getFlag("--mode") as PermissionMode | undefined,
         driverFactory: async (p) => {
           const built = buildSpawnSpecForAgent({
             sessionId: p.sessionId,
@@ -268,7 +269,7 @@ async function main(): Promise<void> {
       const prompt = getFlag("-p") ?? getFlag("--prompt");
       if (!endpoint || !prompt) {
         console.error(
-          'Usage: ar exec --endpoint wss://<node>.ts.net/v1/ws -p "<prompt>" [--agent antigravity] [--model ...] [--effort high] [--cwd .] [--output-format text|json]',
+          'Usage: ar exec --endpoint wss://<node>.ts.net/v1/ws -p "<prompt>" [--agent antigravity] [--model ...] [--effort high] [--mode plan|default|accept-edits|auto|workspace-full|full-access] [--cwd .] [--output-format text|json]',
         );
         process.exit(1);
       }

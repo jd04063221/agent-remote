@@ -226,7 +226,7 @@ default_effort = "medium"
 
 # ---- 本地工具权限策略（优先级：deny > ask > allow）----
 [permissions]
-default_mode = "default"              # default | accept-edits | auto | plan
+default_mode = "default"              # plan | default | accept-edits | auto | workspace-full | full-access
 allow = ["read(**)", "search(**)", "command(git status*)", "command(git diff*)"]
 ask = ["write(**)", "command(pnpm *)"]
 deny = ["write(.git/**)", "command(rm -rf /*)", "command(sudo *)"]
@@ -322,7 +322,7 @@ ar chat --no-save
 | `/models` | 实时拉取远端可用模型与支持的思考档位 |
 | `/model <id>` | 动态切换下一轮使用的模型 |
 | `/effort <level>` | 动态切换思考深度（`low\|medium\|high\|xhigh\|max`） |
-| `/mode <mode>` | 切换本地权限模式（`default\|accept-edits\|auto\|plan`） |
+| `/mode <mode>` | 切换本地权限模式（`plan\|default\|accept-edits\|auto\|workspace-full\|full-access`） |
 | `/quota` | 实时查询远端剩余额度/余额（支持 Claude / Codex / OpenCode / Droid） |
 | `/usage` | 查看当前线程精确/估算 Token 统计、缓存、思考 Token 与费用 |
 | `/history` | 打印当前线程本地保存的完整聊天记录 |
@@ -422,11 +422,13 @@ ar exec --endpoint wss://<host>.ts.net/v1/ws \
 ## 9. 本地 MCP 联邦与安全权限控制
 
 - **路径沙箱防越狱**：本地工具引擎对所有文件读写做 `fs.realpath` 规范化，严格限制在当前线程绑定的工作目录 / Git Worktree 内，并默认禁止修改 `.git/hooks` 等高危路径。
-- **本地权限模式**：
-  - `default`：读取/搜索默认放行，写入文件、删除文件和 Shell 命令弹窗/终端审批（含彩色 Diff 预览）。
-  - `accept-edits`：自动放行工作区内文件编辑，Shell 命令仍需审批。
-  - `auto`：全自动放行（仍受高危黑名单与 `deny` 规则兜底保护，如 `rm -rf /`、`sudo` 等默认拒绝）。
-  - `plan`：纯只读规划模式，拒绝所有写入与命令执行。
+- **本地权限模式（由低到高 6 档）**：
+  - `plan`（只读规划）：工作区内纯只读，拒绝一切文件写入、删除与命令执行。
+  - `default`（逐次询问）：工作区内读取/搜索放行，文件写入、删除和 Shell 命令均需弹窗/终端审批（含彩色 Diff 预览）。
+  - `accept-edits`（工作区自动编辑）：工作区内自动放行文件写入/编辑，删除与 Shell 命令仍需审批。
+  - `auto`（工作区安全自动）：工作区内自动放行文件编辑与只读检查命令（如 `git status/diff/log`），其他命令仍需审批。
+  - `workspace-full`（工作区完全权限）：严格限定在当前工作区沙盒内（保护 `.git/hooks` 等），工作区内读写、删除、任意构建/测试命令及本地 MCP 全部免审批自动执行（仍拦截 `sudo`、`rm -rf /`、`mkfs` 等高危命令）。
+  - `full-access`（完全权限·无沙盒）：解除工作区目录沙盒限制，自动放行全机路径读写、删除、全部命令（含 `sudo`）与本地 MCP（仅保留 `rm -rf /`、`mkfs`、`format`、fork bomb 极端毁灭操作兜底）。
 - **本地 MCP 联邦（`[local_mcp.*]`）**：在 `config.toml` 配置本地 stdio MCP Server（如本地 PostgreSQL、内网文档库），Hub 启动时会自动把其工具挂载到 Local Tool Engine，经由权限网关审批后暴露给远端 Agent，无需把内网数据库暴露到公网。
 
 ---

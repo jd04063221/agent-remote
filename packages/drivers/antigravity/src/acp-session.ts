@@ -442,7 +442,9 @@ export class AcpRemoteSession extends EventEmitter {
         const serialized = JSON.stringify(toolCall).toLowerCase();
         const options = (params.options ?? []) as Array<{ optionId: string; kind?: string }>;
         const isLocalMcp =
+          toolCall.kind === "mcp" ||
           serialized.includes("agent_remote_local") ||
+          serialized.includes("local_mcp__") ||
           serialized.includes("dispatch_subagent") ||
           serialized.includes("call_remote_model") ||
           serialized.includes("mcp__");
