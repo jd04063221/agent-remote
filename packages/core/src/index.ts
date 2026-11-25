@@ -158,3 +158,5 @@ export interface AgentDriver {
     ephemeralFiles: Record<string, string>;
   }>;
 }
+
+export * from "./config.js";

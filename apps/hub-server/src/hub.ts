@@ -4,7 +4,12 @@ import http from "node:http";
 import path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { buildQuotaSaverGuidance } from "@agent-remote/core";
+import {
+  buildQuotaSaverGuidance,
+  loadAgentRemoteConfig,
+  parsePermissionRuleExpr,
+  type AgentRemoteConfig,
+} from "@agent-remote/core";
 import { AcpRemoteSession } from "@agent-remote/driver-antigravity";
 import { getClaudeFallbackModels } from "@agent-remote/driver-claude";
 import { parseFactoryCustomModelsJson } from "@agent-remote/driver-factory-droid";
@@ -24,17 +29,22 @@ import {
   type FederatedSubagentResult,
 } from "@agent-remote/subagent-orchestrator";
 import {
+  LocalHttpMcpServer,
   LocalToolEngine,
   McpJsonRpcHandler,
+  mountLocalMcpServers,
   PolicyEngine,
   WorkspaceSandbox,
   WorktreeManager,
   type ApprovalOutcome,
   type ApprovalRequest,
   type PermissionMode,
+  type PolicyRule,
+  type StdioMcpClient,
 } from "@agent-remote/tool-plane";
 import {
   LocalProcessChannel,
+  SshSessionChannel,
   TailnetDirectClient,
   type NodeProbeResult,
   type RemoteSessionChannel,
@@ -61,6 +71,8 @@ interface ActiveRuntime {
   engine: LocalToolEngine;
   policy: PolicyEngine;
   abortController: AbortController;
+  localMcpClients: StdioMcpClient[];
+  localHttpMcp?: LocalHttpMcpServer;
 }
 
 export interface HubServerOptions {
@@ -68,10 +80,12 @@ export interface HubServerOptions {
   host?: string;
   dbPath: string;
   webDistDir?: string;
+  configPath?: string;
 }
 
 export class AgentRemoteHub {
   readonly store: HubStore;
+  readonly config: AgentRemoteConfig;
   private readonly webDistDir?: string;
 
   private readonly clients = new Map<string, TailnetDirectClient>();
@@ -86,9 +100,71 @@ export class AgentRemoteHub {
   private httpServer?: http.Server;
   private wss?: WebSocketServer;
 
-  constructor(options: { dbPath: string; webDistDir?: string }) {
+  constructor(options: { dbPath: string; webDistDir?: string; configPath?: string }) {
     this.store = new HubStore(options.dbPath);
     this.webDistDir = options.webDistDir;
+    this.config = loadAgentRemoteConfig({ globalPath: options.configPath });
+    this.hydrateFromConfig(this.config);
+  }
+
+  private hydrateFromConfig(cfg: AgentRemoteConfig): void {
+    for (const [id, h] of Object.entries(cfg.hosts)) {
+      if (!this.store.getHost(id)) {
+        this.store.upsertHost({
+          id,
+          name: h.name ?? id,
+          transport: h.transport,
+          endpoint: h.endpoint,
+          authMode: h.auth,
+          bearerToken: h.bearer_token,
+          sshTarget: h.ssh_target,
+          maxSessions: h.max_concurrent_sessions,
+        });
+      }
+    }
+    for (const [id, p] of Object.entries(cfg.profiles)) {
+      if (!this.store.getProfile(id)) {
+        this.store.upsertProfile({
+          id,
+          name: p.name ?? id,
+          hostId: p.host,
+          agent: p.agent,
+          remoteBin: p.remote_bin,
+          defaultModel: p.default_model,
+          defaultEffort: p.default_effort,
+        });
+      }
+    }
+    for (const [name, s] of Object.entries(cfg.subagents)) {
+      this.store.upsertBlueprint({
+        name,
+        description: s.description,
+        systemPrompt: s.system_prompt,
+        tools: s.tools,
+        executionMode: s.execution_mode,
+        defaultHostId: s.default_host,
+        defaultProfileId: s.default_profile,
+        defaultModel: s.default_model,
+        defaultEffort: s.default_effort,
+      });
+    }
+  }
+
+  private buildConfiguredPolicyRules(): PolicyRule[] {
+    const rules: PolicyRule[] = [];
+    for (const expr of this.config.permissions.deny) {
+      const r = parsePermissionRuleExpr(expr, "deny");
+      if (r) rules.push(r);
+    }
+    for (const expr of this.config.permissions.ask) {
+      const r = parsePermissionRuleExpr(expr, "ask");
+      if (r) rules.push(r);
+    }
+    for (const expr of this.config.permissions.allow) {
+      const r = parsePermissionRuleExpr(expr, "allow");
+      if (r) rules.push(r);
+    }
+    return rules;
   }
 
   async listen(port = 3775, host = "127.0.0.1"): Promise<{ url: string; port: number }> {
@@ -114,6 +190,8 @@ export class AgentRemoteHub {
     for (const rt of this.runtimes.values()) {
       rt.abortController.abort();
       rt.channel.kill();
+      for (const c of rt.localMcpClients) c.close();
+      await rt.localHttpMcp?.close();
     }
     this.runtimes.clear();
     for (const client of this.clients.values()) {
@@ -456,7 +534,10 @@ export class AgentRemoteHub {
     }
 
     const sandbox = new WorkspaceSandbox({ workspaceRoot: thread.worktreePath });
-    const policy = new PolicyEngine({ mode: (thread.mode as PermissionMode) || "default" });
+    const policy = new PolicyEngine({
+      mode: (thread.mode as PermissionMode) || this.config.permissions.default_mode || "default",
+      rules: this.buildConfiguredPolicyRules(),
+    });
     const abortController = new AbortController();
 
     const engine = new LocalToolEngine({
@@ -512,6 +593,18 @@ export class AgentRemoteHub {
         )
       : undefined;
 
+    // Mount configured local stdio MCP servers ([local_mcp.*]) under Policy Gate
+    const localMcpConfigs = Object.entries(this.config.local_mcp).map(([name, m]) => ({
+      name,
+      command: m.command,
+      args: m.args,
+      env: m.env,
+    }));
+    const localMcpClients =
+      localMcpConfigs.length > 0
+        ? await mountLocalMcpServers(engine, localMcpConfigs).catch(() => [])
+        : [];
+
     const mcpHandler = new McpJsonRpcHandler(engine);
     const sessionId = `${thread.id}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -529,7 +622,17 @@ export class AgentRemoteHub {
       nativePlans: plans,
     });
 
-    const channel = await this.spawnOnHost(host, built.spawn);
+    const spawned = await this.spawnOnHost(host, built.spawn, mcpHandler, () => ({
+      sessionId,
+      signal: abortController.signal,
+      onTerminalOutput: (chunk) => {
+        this.broadcast({
+          type: "terminal_chunk",
+          payload: { threadId: thread.id, chunk },
+        });
+      },
+    }));
+    const channel = spawned.channel;
 
     channel.setMcpHandler((req) =>
       mcpHandler.handleRpc(req, {
@@ -580,6 +683,8 @@ export class AgentRemoteHub {
       engine,
       policy,
       abortController,
+      localMcpClients,
+      localHttpMcp: spawned.localHttpMcp,
     };
     this.runtimes.set(thread.id, rt);
     return rt;
@@ -634,7 +739,10 @@ export class AgentRemoteHub {
       nativePlans: [],
     });
 
-    const channel = await this.spawnOnHost(host, built.spawn);
+    const spawned = await this.spawnOnHost(host, built.spawn, childMcp, () => ({
+      sessionId: childId,
+    }));
+    const channel = spawned.channel;
     channel.setMcpHandler((req) => childMcp.handleRpc(req, { sessionId: childId }));
 
     let collected = "";
@@ -687,24 +795,66 @@ export class AgentRemoteHub {
       };
     } finally {
       channel.kill();
+      await spawned.localHttpMcp?.close();
     }
   }
 
   private async spawnOnHost(
     host: HostRecord,
     spec: Parameters<TailnetDirectClient["spawnSession"]>[0],
-  ): Promise<RemoteSessionChannel> {
+    mcpHandler?: McpJsonRpcHandler,
+    ctxFactory?: () => { sessionId: string; signal?: AbortSignal; onTerminalOutput?: (c: string) => void },
+  ): Promise<{ channel: RemoteSessionChannel; localHttpMcp?: LocalHttpMcpServer }> {
     if (host.transport === "local") {
-      return new LocalProcessChannel({
-        sessionId: spec.sessionId,
-        command: spec.command,
-        args: spec.args,
-        env: spec.env,
-      });
+      let localHttpMcp: LocalHttpMcpServer | undefined;
+      let mcpUrl: string | undefined;
+      let mcpToken: string | undefined;
+      if (spec.enableMcpBridge && mcpHandler && ctxFactory) {
+        localHttpMcp = new LocalHttpMcpServer(mcpHandler, ctxFactory);
+        const started = await localHttpMcp.start();
+        mcpUrl = started.url;
+        mcpToken = started.token;
+      }
+      return {
+        channel: new LocalProcessChannel({
+          sessionId: spec.sessionId,
+          command: spec.command,
+          args: spec.args,
+          env: spec.env,
+          mcpEndpointUrl: mcpUrl,
+          mcpBearerToken: mcpToken,
+        }),
+        localHttpMcp,
+      };
     }
+
+    if (host.transport === "tailscale-ssh" || host.transport === "openssh") {
+      if (!host.sshTarget) {
+        throw new Error(`Host "${host.id}" (${host.transport}) requires sshTarget`);
+      }
+      let localHttpMcp: LocalHttpMcpServer | undefined;
+      let localMcpPort: number | undefined;
+      let mcpToken: string | undefined;
+      if (spec.enableMcpBridge && mcpHandler && ctxFactory) {
+        localHttpMcp = new LocalHttpMcpServer(mcpHandler, ctxFactory);
+        const started = await localHttpMcp.start();
+        localMcpPort = started.port;
+        mcpToken = started.token;
+      }
+      return {
+        channel: new SshSessionChannel({
+          sshTarget: host.sshTarget,
+          spawnSpec: spec,
+          localMcpPort,
+          mcpBearerToken: mcpToken,
+        }),
+        localHttpMcp,
+      };
+    }
+
     await this.connectHost(host.id);
     const client = this.clients.get(host.id)!;
-    return await client.spawnSession(spec);
+    return { channel: await client.spawnSession(spec) };
   }
 
   private broadcast(msg: { type: string; payload: unknown }): void {
