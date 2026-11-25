@@ -129,6 +129,16 @@ export class PolicyEngine {
     if (action === "read" || action === "search") {
       return { decision: "allow", reason: "Read-only workspace inspection", signature };
     }
+    if (
+      action === "mcp" &&
+      (target === "dispatch_subagent" || target === "call_remote_model")
+    ) {
+      return {
+        decision: "allow",
+        reason: "Subagent delegation (child tools enforce their own sandbox & policy)",
+        signature,
+      };
+    }
     if (action === "write") {
       if (this.mode === "accept-edits" || this.mode === "auto") {
         return { decision: "allow", reason: `Auto-allowed in ${this.mode} mode`, signature };

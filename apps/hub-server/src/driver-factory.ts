@@ -33,6 +33,9 @@ import type { RemoteSessionChannel } from "@agent-remote/transport";
 export interface DriverEventPayload {
   type: string;
   text?: string;
+  toolName?: string;
+  status?: string;
+  summary?: string;
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;

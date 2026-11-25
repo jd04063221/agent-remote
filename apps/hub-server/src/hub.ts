@@ -66,6 +66,28 @@ import {
   type ThreadRecord,
 } from "./store.js";
 
+class TurnCancelledError extends Error {
+  constructor() {
+    super("Turn cancelled by user");
+    this.name = "TurnCancelledError";
+  }
+}
+
+interface ActiveChildHandle {
+  childId: string;
+  cancel: () => void;
+  forceKill: () => void;
+}
+
+interface ActiveTurn {
+  turnId: string;
+  abortController: AbortController;
+  cancelled: boolean;
+  children: Map<string, ActiveChildHandle>;
+  forceFinish?: () => void;
+  graceTimer?: NodeJS.Timeout;
+}
+
 interface ActiveRuntime {
   threadId: string;
   profileId: string;
@@ -99,9 +121,10 @@ export class AgentRemoteHub {
   private readonly probeCache = new Map<string, NodeProbeResult>();
   private readonly hostErrors = new Map<string, string>();
   private readonly runtimes = new Map<string, ActiveRuntime>();
+  private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly pendingApprovals = new Map<
     string,
-    { request: ApprovalRequest; resolve: (o: ApprovalOutcome) => void }
+    { threadId: string; request: ApprovalRequest; resolve: (o: ApprovalOutcome) => void }
   >();
   private readonly uiSockets = new Set<WebSocket>();
 
@@ -196,6 +219,20 @@ export class AgentRemoteHub {
   }
 
   async close(): Promise<void> {
+    for (const [tid, turn] of this.activeTurns.entries()) {
+      turn.cancelled = true;
+      if (turn.graceTimer) clearTimeout(turn.graceTimer);
+      turn.abortController.abort();
+      for (const child of turn.children.values()) {
+        try {
+          child.forceKill();
+        } catch {
+          // ignore
+        }
+      }
+      turn.forceFinish?.();
+      this.activeTurns.delete(tid);
+    }
     for (const rt of this.runtimes.values()) {
       rt.abortController.abort();
       rt.channel.kill();
@@ -587,6 +624,19 @@ export class AgentRemoteHub {
     thread.updatedAt = new Date().toISOString();
     this.store.upsertThread(thread);
 
+    // If a prior turn is somehow still running on this thread, cancel it before starting a new turn
+    if (this.activeTurns.has(threadId)) {
+      this.cancelThread(threadId);
+    }
+
+    const turn: ActiveTurn = {
+      turnId: crypto.randomUUID(),
+      abortController: new AbortController(),
+      cancelled: false,
+      children: new Map(),
+    };
+    this.activeTurns.set(threadId, turn);
+
     const userEv = this.store.appendEvent(threadId, "user_message", {
       text: input.prompt,
       model: thread.model,
@@ -597,7 +647,7 @@ export class AgentRemoteHub {
     this.broadcast({ type: "thread_updated", payload: thread });
 
     // Launch turn asynchronously so HTTP returns immediately while UI receives real-time WS events
-    void this.runPromptTurn(thread, input.prompt);
+    void this.runPromptTurn(thread, input.prompt, turn);
   }
 
   resolveApproval(approvalId: string, outcome: ApprovalOutcome): boolean {
@@ -609,16 +659,122 @@ export class AgentRemoteHub {
     return true;
   }
 
-  cancelThread(threadId: string): void {
-    const rt = this.runtimes.get(threadId);
-    if (!rt) return;
-    rt.abortController.abort();
-    rt.driver.cancel();
+  private rejectPendingApprovalsForThread(threadId: string, reason: string): void {
+    for (const [id, item] of this.pendingApprovals.entries()) {
+      if (item.threadId === threadId) {
+        this.pendingApprovals.delete(id);
+        const outcome: ApprovalOutcome = { approved: false, reason };
+        item.resolve(outcome);
+        this.broadcast({ type: "approval_resolved", payload: { id, outcome } });
+      }
+    }
   }
 
-  private async runPromptTurn(thread: ThreadRecord, prompt: string): Promise<void> {
+  private teardownRuntime(threadId: string): void {
+    const rt = this.runtimes.get(threadId);
+    if (!rt) return;
+    this.runtimes.delete(threadId);
     try {
-      const rt = await this.ensureRuntime(thread);
+      rt.abortController.abort();
+    } catch {
+      // ignore
+    }
+    try {
+      rt.channel.kill();
+    } catch {
+      // ignore
+    }
+    for (const c of rt.localMcpClients) {
+      try {
+        c.close();
+      } catch {
+        // ignore
+      }
+    }
+    void rt.localHttpMcp?.close().catch(() => {});
+  }
+
+  cancelThread(threadId: string): void {
+    const turn = this.activeTurns.get(threadId);
+    const rt = this.runtimes.get(threadId);
+
+    this.rejectPendingApprovalsForThread(threadId, "Cancelled by user");
+
+    if (!turn) {
+      try {
+        rt?.driver.cancel();
+      } catch {
+        // ignore
+      }
+      const existing = this.store.getThread(threadId);
+      if (existing && (existing.status === "running" || existing.status === "waiting_approval")) {
+        existing.status = "idle";
+        existing.updatedAt = new Date().toISOString();
+        this.store.upsertThread(existing);
+        this.broadcast({ type: "thread_updated", payload: existing });
+      }
+      return;
+    }
+
+    const alreadyCancelling = turn.cancelled;
+    turn.cancelled = true;
+    turn.abortController.abort();
+
+    // Immediately stop and kill every active child subagent spawned by this turn
+    for (const child of turn.children.values()) {
+      try {
+        child.cancel();
+      } catch {
+        // ignore
+      }
+      try {
+        child.forceKill();
+      } catch {
+        // ignore
+      }
+    }
+
+    // Ask the main driver to cancel gracefully first
+    try {
+      rt?.driver.cancel();
+    } catch {
+      // ignore
+    }
+
+    const forceStop = () => {
+      if (turn.graceTimer) {
+        clearTimeout(turn.graceTimer);
+        turn.graceTimer = undefined;
+      }
+      // If the remote ACP/CLI process ignored session/cancel, kill its channel so the turn unblocks immediately;
+      // local SQLite + remoteSessionId seamlessly restore context on the next prompt.
+      this.teardownRuntime(threadId);
+      turn.forceFinish?.();
+    };
+
+    if (alreadyCancelling) {
+      // Second click on Cancel triggers immediate hard stop without waiting for grace period
+      forceStop();
+      return;
+    }
+
+    if (!turn.graceTimer) {
+      turn.graceTimer = setTimeout(forceStop, 1200);
+      turn.graceTimer.unref?.();
+    }
+  }
+
+  private async runPromptTurn(
+    thread: ThreadRecord,
+    prompt: string,
+    turn: ActiveTurn,
+  ): Promise<void> {
+    try {
+      if (turn.cancelled) throw new TurnCancelledError();
+      const rt = await this.ensureRuntime(thread, turn);
+      if (turn.cancelled) throw new TurnCancelledError();
+
+      rt.abortController = turn.abortController;
       rt.policy.setMode((thread.mode as PermissionMode) || "default");
       rt.turnReceivedExactUsage = false;
       rt.turnEstimatedOutputTokens = 0;
@@ -635,10 +791,37 @@ export class AgentRemoteHub {
         thread.model,
         thread.effort,
       );
-      await rt.driver.prompt(effectivePrompt, {
-        model: resolvedTurn.model,
-        effort: resolvedTurn.effort,
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finishOk = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+        const finishErr = (err: unknown) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        };
+        turn.forceFinish = () => finishErr(new TurnCancelledError());
+        if (turn.cancelled) {
+          finishErr(new TurnCancelledError());
+          return;
+        }
+        void rt.driver
+          .prompt(effectivePrompt, {
+            model: resolvedTurn.model,
+            effort: resolvedTurn.effort,
+          })
+          .then(finishOk, finishErr);
       });
+
+      if (turn.cancelled) {
+        throw new TurnCancelledError();
+      }
 
       if (!thread.ephemeralRemote) {
         const rsid = rt.driver.getRemoteSessionId?.();
@@ -659,26 +842,51 @@ export class AgentRemoteHub {
       this.broadcast({ type: "thread_event", payload: doneEv });
       this.broadcast({ type: "thread_updated", payload: thread });
     } catch (err) {
-      thread.status = "error";
-      thread.updatedAt = new Date().toISOString();
-      this.store.upsertThread(thread);
-      const errEv = this.store.appendEvent(thread.id, "error", {
-        message: (err as Error).message,
+      if (turn.cancelled || err instanceof TurnCancelledError) {
+        thread.status = "idle";
+        thread.updatedAt = new Date().toISOString();
+        this.store.upsertThread(thread);
+        const cancelEv = this.store.appendEvent(thread.id, "turn_cancelled", {
+          reason: "Stopped by user",
+        });
+        this.broadcast({ type: "thread_event", payload: cancelEv });
+        this.broadcast({ type: "thread_updated", payload: thread });
+      } else {
+        thread.status = "error";
+        thread.updatedAt = new Date().toISOString();
+        this.store.upsertThread(thread);
+        const errEv = this.store.appendEvent(thread.id, "error", {
+          message: (err as Error).message,
+        });
+        this.broadcast({ type: "thread_event", payload: errEv });
+        this.broadcast({ type: "thread_updated", payload: thread });
+      }
+    } finally {
+      if (turn.graceTimer) {
+        clearTimeout(turn.graceTimer);
+        turn.graceTimer = undefined;
+      }
+      turn.forceFinish = undefined;
+      if (this.activeTurns.get(thread.id) === turn) {
+        this.activeTurns.delete(thread.id);
+      }
+      this.broadcast({
+        type: "tool_activity",
+        payload: { threadId: thread.id, phase: "clear" },
       });
-      this.broadcast({ type: "thread_event", payload: errEv });
-      this.broadcast({ type: "thread_updated", payload: thread });
     }
   }
 
-  private async ensureRuntime(thread: ThreadRecord): Promise<ActiveRuntime> {
+  private async ensureRuntime(thread: ThreadRecord, turn: ActiveTurn): Promise<ActiveRuntime> {
     const existing = this.runtimes.get(thread.id);
     if (existing && existing.profileId === thread.profileId && existing.hostId === thread.hostId) {
       return existing;
     }
     if (existing) {
-      existing.channel.kill();
-      this.runtimes.delete(thread.id);
+      this.teardownRuntime(thread.id);
     }
+
+    if (turn.cancelled) throw new TurnCancelledError();
 
     const host = this.store.getHost(thread.hostId);
     const profile = this.store.getProfile(thread.profileId);
@@ -691,12 +899,30 @@ export class AgentRemoteHub {
       mode: (thread.mode as PermissionMode) || this.config.permissions.default_mode || "default",
       rules: this.buildConfiguredPolicyRules(),
     });
-    const abortController = new AbortController();
+
+    const getCurrentSignal = () =>
+      this.activeTurns.get(thread.id)?.abortController.signal ?? turn.abortController.signal;
 
     const engine = new LocalToolEngine({
       sandbox,
       policy,
+      onToolEvent: (ev) => {
+        if (ev.toolName === "dispatch_subagent" || ev.toolName === "call_remote_model") return;
+        this.broadcast({
+          type: "tool_activity",
+          payload: {
+            threadId: thread.id,
+            phase: ev.phase,
+            toolName: ev.toolName,
+            summary: ev.summary,
+            ok: ev.ok,
+          },
+        });
+      },
       onApprovalNeeded: async (req) => {
+        if (getCurrentSignal().aborted) {
+          return { approved: false, reason: "Cancelled by user" };
+        }
         thread.status = "waiting_approval";
         this.store.upsertThread(thread);
         this.broadcast({ type: "thread_updated", payload: thread });
@@ -704,9 +930,11 @@ export class AgentRemoteHub {
 
         return await new Promise<ApprovalOutcome>((resolve) => {
           this.pendingApprovals.set(req.id, {
+            threadId: thread.id,
             request: req,
             resolve: (outcome) => {
-              thread.status = "running";
+              const activeTurn = this.activeTurns.get(thread.id);
+              thread.status = activeTurn && !activeTurn.cancelled ? "running" : "idle";
               this.store.upsertThread(thread);
               this.broadcast({ type: "thread_updated", payload: thread });
               resolve(outcome);
@@ -801,7 +1029,7 @@ export class AgentRemoteHub {
 
     const spawned = await this.spawnOnHost(host, built.spawn, mcpHandler, () => ({
       sessionId,
-      signal: abortController.signal,
+      signal: getCurrentSignal(),
       onTerminalOutput: (chunk) => {
         this.broadcast({
           type: "terminal_chunk",
@@ -811,10 +1039,17 @@ export class AgentRemoteHub {
     }));
     const channel = spawned.channel;
 
+    if (turn.cancelled) {
+      channel.kill();
+      for (const c of localMcpClients) c.close();
+      await spawned.localHttpMcp?.close();
+      throw new TurnCancelledError();
+    }
+
     channel.setMcpHandler((req) =>
       mcpHandler.handleRpc(req, {
         sessionId,
-        signal: abortController.signal,
+        signal: getCurrentSignal(),
         onTerminalOutput: (chunk) => {
           this.broadcast({
             type: "terminal_chunk",
@@ -824,20 +1059,35 @@ export class AgentRemoteHub {
       }),
     );
 
-    const driver = await attachDriverSession({
-      agent: profile.agent,
-      hostId: host.id,
-      profileId: profile.id,
-      sessionId,
-      channel,
-      toolEngine: engine,
-      model: thread.model ?? profile.defaultModel,
-      effort: thread.effort ?? profile.defaultEffort,
-      resumeRemoteSessionId: willAttemptNativeResume ? thread.remoteSessionId : undefined,
-      ephemeralRemote: thread.ephemeralRemote,
-      systemPromptAppend: built.systemPromptAppend,
-      developerInstructions: built.developerInstructions,
-    });
+    let driver: UnifiedDriverSession;
+    try {
+      driver = await attachDriverSession({
+        agent: profile.agent,
+        hostId: host.id,
+        profileId: profile.id,
+        sessionId,
+        channel,
+        toolEngine: engine,
+        model: thread.model ?? profile.defaultModel,
+        effort: thread.effort ?? profile.defaultEffort,
+        resumeRemoteSessionId: willAttemptNativeResume ? thread.remoteSessionId : undefined,
+        ephemeralRemote: thread.ephemeralRemote,
+        systemPromptAppend: built.systemPromptAppend,
+        developerInstructions: built.developerInstructions,
+      });
+    } catch (err) {
+      channel.kill();
+      for (const c of localMcpClients) c.close();
+      await spawned.localHttpMcp?.close();
+      throw err;
+    }
+
+    if (turn.cancelled) {
+      channel.kill();
+      for (const c of localMcpClients) c.close();
+      await spawned.localHttpMcp?.close();
+      throw new TurnCancelledError();
+    }
 
     if (!thread.ephemeralRemote) {
       const rsid = driver.getRemoteSessionId?.();
@@ -874,7 +1124,7 @@ export class AgentRemoteHub {
       driver,
       engine,
       policy,
-      abortController,
+      abortController: turn.abortController,
       localMcpClients,
       localHttpMcp: spawned.localHttpMcp,
       pendingHistoryPrefix,
@@ -899,6 +1149,18 @@ export class AgentRemoteHub {
         this.broadcast({ type: "thread_updated", payload: thread });
         return;
       }
+      if (ev.type === "tool_update") {
+        this.broadcast({
+          type: "tool_activity",
+          payload: {
+            threadId: thread.id,
+            phase: ev.status === "completed" || ev.status === "done" ? "end" : "start",
+            toolName: ev.toolName ?? "tool",
+            summary: ev.summary ?? ev.toolName ?? "tool",
+          },
+        });
+        return;
+      }
       if (ev.type === "text_delta" && ev.text) {
         rt.turnEstimatedOutputTokens += Math.ceil(ev.text.length / 4);
       }
@@ -920,18 +1182,12 @@ export class AgentRemoteHub {
     parentThread: ThreadRecord,
     call: FederatedSubagentCall,
   ): Promise<FederatedSubagentResult> {
-    const childId = `sub_${crypto.randomBytes(4).toString("hex")}`;
-    const spawnEv = this.store.appendEvent(parentThread.id, "subagent_started", {
-      childId,
-      subagentName: call.subagentName,
-      hostId: call.hostId,
-      profileId: call.profileId,
-      model: call.model,
-      effort: call.effort,
-      pureInferenceOnly: call.pureInferenceOnly,
-    });
-    this.broadcast({ type: "thread_event", payload: spawnEv });
+    const turn = this.activeTurns.get(parentThread.id);
+    if (turn?.cancelled) {
+      return { ok: false, output: "Subagent cancelled by user." };
+    }
 
+    const childId = `sub_${crypto.randomBytes(4).toString("hex")}`;
     const host = this.store.getHost(call.hostId);
     const profile = this.store.getProfile(call.profileId);
     if (!host || !profile) {
@@ -940,16 +1196,6 @@ export class AgentRemoteHub {
         output: `Federated target not found: host=${call.hostId} profile=${call.profileId}`,
       };
     }
-
-    const childSandbox = new WorkspaceSandbox({
-      workspaceRoot: parentThread.worktreePath,
-      readOnly: call.readOnly,
-    });
-    const childEngine = new LocalToolEngine({
-      sandbox: childSandbox,
-      policy: new PolicyEngine({ mode: call.readOnly ? "plan" : "accept-edits" }),
-    });
-    const childMcp = new McpJsonRpcHandler(childEngine);
 
     const sameAsMain = host.id === parentThread.hostId && profile.id === parentThread.profileId;
     const rawChildModel =
@@ -960,6 +1206,55 @@ export class AgentRemoteHub {
       rawChildModel,
       call.effort ?? profile.defaultEffort,
     );
+
+    const spawnEv = this.store.appendEvent(parentThread.id, "subagent_started", {
+      childId,
+      subagentName: call.subagentName,
+      hostId: host.id,
+      profileId: profile.id,
+      model: resolvedChild.model,
+      effort: resolvedChild.effort,
+      pureInferenceOnly: call.pureInferenceOnly,
+      task: call.task.slice(0, 300),
+    });
+    this.broadcast({ type: "thread_event", payload: spawnEv });
+
+    const emitStage = (stage: "spawning" | "initializing" | "running") => {
+      this.broadcast({
+        type: "subagent_status",
+        payload: {
+          threadId: parentThread.id,
+          childId,
+          subagentName: call.subagentName,
+          stage,
+        },
+      });
+    };
+    emitStage("spawning");
+
+    const childSandbox = new WorkspaceSandbox({
+      workspaceRoot: parentThread.worktreePath,
+      readOnly: call.readOnly,
+    });
+    const childEngine = new LocalToolEngine({
+      sandbox: childSandbox,
+      policy: new PolicyEngine({ mode: call.readOnly ? "plan" : "accept-edits" }),
+      onToolEvent: (ev) => {
+        this.broadcast({
+          type: "subagent_tool",
+          payload: {
+            threadId: parentThread.id,
+            childId,
+            subagentName: call.subagentName,
+            phase: ev.phase,
+            toolName: ev.toolName,
+            summary: ev.summary,
+            ok: ev.ok,
+          },
+        });
+      },
+    });
+    const childMcp = new McpJsonRpcHandler(childEngine);
 
     const built = buildSpawnSpecForAgent({
       sessionId: childId,
@@ -976,18 +1271,41 @@ export class AgentRemoteHub {
       nativePlans: [],
     });
 
-    const spawned = await this.spawnOnHost(host, built.spawn, childMcp, () => ({
+    const childCtxFactory = () => ({
       sessionId: childId,
-    }));
-    const channel = spawned.channel;
-    channel.setMcpHandler((req) => childMcp.handleRpc(req, { sessionId: childId }));
+      signal: turn?.abortController.signal,
+      onTerminalOutput: (chunk: string) => {
+        this.broadcast({
+          type: "terminal_chunk",
+          payload: { threadId: parentThread.id, chunk },
+        });
+      },
+    });
 
+    let spawned: { channel: RemoteSessionChannel; localHttpMcp?: LocalHttpMcpServer } | undefined;
+    let driver: UnifiedDriverSession | undefined;
     let collected = "";
     let exactIn = 0;
     let exactOut = 0;
     let gotExact = false;
+
     try {
-      const driver = await attachDriverSession({
+      spawned = await this.spawnOnHost(host, built.spawn, childMcp, childCtxFactory);
+      const channel = spawned.channel;
+      channel.setMcpHandler((req) => childMcp.handleRpc(req, childCtxFactory()));
+
+      turn?.children.set(childId, {
+        childId,
+        cancel: () => driver?.cancel(),
+        forceKill: () => channel.kill(),
+      });
+
+      if (turn?.cancelled) {
+        throw new TurnCancelledError();
+      }
+
+      emitStage("initializing");
+      driver = await attachDriverSession({
         agent: profile.agent,
         hostId: host.id,
         profileId: profile.id,
@@ -1001,9 +1319,46 @@ export class AgentRemoteHub {
         developerInstructions: built.developerInstructions,
       });
 
+      if (turn?.cancelled) {
+        throw new TurnCancelledError();
+      }
+
       driver.onEvent((ev) => {
         if (ev.type === "text_delta" && ev.text) {
           collected += ev.text;
+          this.broadcast({
+            type: "subagent_stream",
+            payload: {
+              threadId: parentThread.id,
+              childId,
+              subagentName: call.subagentName,
+              stream: "text",
+              text: ev.text,
+            },
+          });
+        } else if (ev.type === "thought_delta" && ev.text) {
+          this.broadcast({
+            type: "subagent_stream",
+            payload: {
+              threadId: parentThread.id,
+              childId,
+              subagentName: call.subagentName,
+              stream: "thought",
+              text: ev.text,
+            },
+          });
+        } else if (ev.type === "tool_update") {
+          this.broadcast({
+            type: "subagent_tool",
+            payload: {
+              threadId: parentThread.id,
+              childId,
+              subagentName: call.subagentName,
+              phase: ev.status === "completed" || ev.status === "done" ? "end" : "start",
+              toolName: ev.toolName ?? "tool",
+              summary: ev.summary ?? ev.toolName ?? "tool",
+            },
+          });
         } else if (ev.type === "usage_delta") {
           gotExact = true;
           exactIn += ev.inputTokens ?? 0;
@@ -1011,9 +1366,54 @@ export class AgentRemoteHub {
         }
       });
 
-      await driver.prompt(call.task, {
-        model: resolvedChild.model,
-        effort: resolvedChild.effort,
+      emitStage("running");
+
+      const activeDriver = driver;
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+          if (!settled) {
+            settled = true;
+            try {
+              activeDriver.cancel();
+            } catch {
+              // ignore
+            }
+            try {
+              channel.kill();
+            } catch {
+              // ignore
+            }
+            reject(new TurnCancelledError());
+          }
+        };
+        const sig = turn?.abortController.signal;
+        if (sig?.aborted) {
+          onAbort();
+          return;
+        }
+        sig?.addEventListener("abort", onAbort, { once: true });
+        void activeDriver
+          .prompt(call.task, {
+            model: resolvedChild.model,
+            effort: resolvedChild.effort,
+          })
+          .then(
+            () => {
+              sig?.removeEventListener("abort", onAbort);
+              if (!settled) {
+                settled = true;
+                resolve();
+              }
+            },
+            (err) => {
+              sig?.removeEventListener("abort", onAbort);
+              if (!settled) {
+                settled = true;
+                reject(err);
+              }
+            },
+          );
       });
 
       const inTok = gotExact ? exactIn : Math.ceil(call.task.length / 4);
@@ -1021,10 +1421,14 @@ export class AgentRemoteHub {
       const doneEv = this.store.appendEvent(parentThread.id, "subagent_completed", {
         childId,
         subagentName: call.subagentName,
+        hostId: host.id,
+        profileId: profile.id,
         model: resolvedChild.model,
         effort: resolvedChild.effort,
+        ok: true,
         offloadedTokens: inTok + outTok,
         preview: collected.slice(0, 400),
+        text: collected.slice(0, 12_000),
       });
       this.broadcast({ type: "thread_event", payload: doneEv });
       return {
@@ -1034,13 +1438,37 @@ export class AgentRemoteHub {
         outputTokens: outTok,
       };
     } catch (err) {
+      const wasCancelled = Boolean(turn?.cancelled) || err instanceof TurnCancelledError;
+      const errMsg = wasCancelled ? "Cancelled by user" : (err as Error).message;
+      const doneEv = this.store.appendEvent(parentThread.id, "subagent_completed", {
+        childId,
+        subagentName: call.subagentName,
+        hostId: host.id,
+        profileId: profile.id,
+        model: resolvedChild.model,
+        effort: resolvedChild.effort,
+        ok: false,
+        cancelled: wasCancelled,
+        error: errMsg,
+        offloadedTokens: 0,
+        preview: collected.slice(0, 400),
+        text: collected.slice(0, 12_000),
+      });
+      this.broadcast({ type: "thread_event", payload: doneEv });
       return {
         ok: false,
-        output: `Subagent "${call.subagentName}" failed: ${(err as Error).message}`,
+        output: wasCancelled
+          ? `Subagent "${call.subagentName}" cancelled by user.`
+          : `Subagent "${call.subagentName}" failed: ${errMsg}`,
       };
     } finally {
-      channel.kill();
-      await spawned.localHttpMcp?.close();
+      turn?.children.delete(childId);
+      try {
+        spawned?.channel.kill();
+      } catch {
+        // ignore
+      }
+      await spawned?.localHttpMcp?.close().catch(() => {});
     }
   }
 
@@ -1310,14 +1738,8 @@ export class AgentRemoteHub {
           return sendJson(res, 200, { thread, events: this.store.listEvents(threadId) });
         }
         if (req.method === "DELETE" && !action) {
-          const rt = this.runtimes.get(threadId);
-          if (rt) {
-            rt.abortController.abort();
-            rt.channel.kill();
-            for (const c of rt.localMcpClients) c.close();
-            await rt.localHttpMcp?.close();
-            this.runtimes.delete(threadId);
-          }
+          this.cancelThread(threadId);
+          this.teardownRuntime(threadId);
           this.store.deleteThread(threadId);
           const state = this.getFullState();
           this.broadcast({ type: "state_snapshot", payload: state });
@@ -1330,7 +1752,7 @@ export class AgentRemoteHub {
         }
         if (req.method === "POST" && action === "cancel") {
           this.cancelThread(threadId);
-          return sendJson(res, 200, { ok: true });
+          return sendJson(res, 200, { ok: true, state: this.getFullState() });
         }
         if (req.method === "GET" && action === "diff") {
           const thread = this.store.getThread(threadId);

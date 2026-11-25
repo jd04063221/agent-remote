@@ -69,6 +69,20 @@ import {
 } from "./policy.js";
 import { WorkspaceSandbox } from "./sandbox.js";
 
+function summarizeToolArgs(toolName: string, args: Record<string, unknown>): string {
+  const pick =
+    args.path ??
+    args.command ??
+    args.pattern ??
+    args.subagent ??
+    args.query ??
+    "";
+  const raw = typeof pick === "string" ? pick.trim() : "";
+  if (!raw) return toolName;
+  const compact = raw.replace(/\s+/g, " ");
+  return compact.length > 100 ? `${compact.slice(0, 97)}...` : compact;
+}
+
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_IGNORED_DIRS = new Set([
   ".git",
@@ -107,22 +121,32 @@ export interface CustomToolHandler {
   ) => Promise<ToolCallResult>;
 }
 
+export interface ToolProgressEvent {
+  phase: "start" | "end";
+  toolName: string;
+  summary: string;
+  ok?: boolean;
+}
+
 export interface LocalToolEngineOptions {
   sandbox: WorkspaceSandbox;
   policy: PolicyEngine;
   onApprovalNeeded?: ApprovalCallback;
+  onToolEvent?: (ev: ToolProgressEvent) => void;
 }
 
 export class LocalToolEngine {
   readonly sandbox: WorkspaceSandbox;
   readonly policy: PolicyEngine;
   private readonly onApprovalNeeded?: ApprovalCallback;
+  private readonly onToolEvent?: (ev: ToolProgressEvent) => void;
   private readonly customTools = new Map<string, CustomToolHandler>();
 
   constructor(options: LocalToolEngineOptions) {
     this.sandbox = options.sandbox;
     this.policy = options.policy;
     this.onApprovalNeeded = options.onApprovalNeeded;
+    this.onToolEvent = options.onToolEvent;
   }
 
   registerCustomTool(handler: CustomToolHandler): void {
@@ -241,38 +265,62 @@ export class LocalToolEngine {
     args: Record<string, unknown>,
     ctx: ToolExecutionContext,
   ): Promise<ToolCallResult> {
-    const custom = this.customTools.get(toolName);
-    if (custom) {
-      const gate = await this.enforcePolicy(
-        ctx.sessionId,
-        custom.action,
-        toolName,
-        toolName,
-        `Invoke tool ${toolName}`,
-      );
-      if (gate) return gate;
-      return custom.execute(args, ctx);
+    if (ctx.signal?.aborted) {
+      return { ok: false, content: "Cancelled by user." };
     }
 
-    switch (toolName) {
-      case "read_file":
-        return this.readFile(args, ctx);
-      case "write_file":
-        return this.writeFile(args, ctx);
-      case "edit_file":
-        return this.editFile(args, ctx);
-      case "delete_file":
-        return this.deleteFile(args, ctx);
-      case "list_dir":
-        return this.listDir(args, ctx);
-      case "glob":
-        return this.globFiles(args, ctx);
-      case "grep":
-        return this.grepFiles(args, ctx);
-      case "run_command":
-        return this.runCommand(args, ctx);
-      default:
-        return { ok: false, content: `Unknown local tool "${toolName}".` };
+    const summary = summarizeToolArgs(toolName, args);
+    this.onToolEvent?.({ phase: "start", toolName, summary });
+    let result: ToolCallResult = { ok: false, content: "Tool failed" };
+    try {
+      const custom = this.customTools.get(toolName);
+      if (custom) {
+        const gate = await this.enforcePolicy(
+          ctx.sessionId,
+          custom.action,
+          toolName,
+          toolName,
+          `Invoke tool ${toolName}`,
+        );
+        if (gate) {
+          result = gate;
+          return result;
+        }
+        result = await custom.execute(args, ctx);
+        return result;
+      }
+
+      switch (toolName) {
+        case "read_file":
+          result = await this.readFile(args, ctx);
+          return result;
+        case "write_file":
+          result = await this.writeFile(args, ctx);
+          return result;
+        case "edit_file":
+          result = await this.editFile(args, ctx);
+          return result;
+        case "delete_file":
+          result = await this.deleteFile(args, ctx);
+          return result;
+        case "list_dir":
+          result = await this.listDir(args, ctx);
+          return result;
+        case "glob":
+          result = await this.globFiles(args, ctx);
+          return result;
+        case "grep":
+          result = await this.grepFiles(args, ctx);
+          return result;
+        case "run_command":
+          result = await this.runCommand(args, ctx);
+          return result;
+        default:
+          result = { ok: false, content: `Unknown local tool "${toolName}".` };
+          return result;
+      }
+    } finally {
+      this.onToolEvent?.({ phase: "end", toolName, summary, ok: result.ok });
     }
   }
 

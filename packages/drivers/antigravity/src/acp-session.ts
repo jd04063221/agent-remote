@@ -213,7 +213,11 @@ export class AcpRemoteSession extends EventEmitter {
 
   cancel(): void {
     if (!this.remoteSessionId) return;
-    this.notify("session/cancel", { sessionId: this.remoteSessionId });
+    try {
+      this.notify("session/cancel", { sessionId: this.remoteSessionId });
+    } catch {
+      // ignore if transport channel already closed
+    }
   }
 
   extractCatalogSnapshot(
@@ -343,6 +347,17 @@ export class AcpRemoteSession extends EventEmitter {
       }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
       this.emit("raw_tool_update", update);
+      const title = String(update.title ?? update.name ?? update.toolName ?? "").trim();
+      const status = String(update.status ?? (kind === "tool_call" ? "running" : "updated"));
+      if (title) {
+        this.emit("event", {
+          type: "tool_update",
+          sessionId: this.localSessionId,
+          toolName: title,
+          status,
+          summary: title,
+        });
+      }
     }
   }
 

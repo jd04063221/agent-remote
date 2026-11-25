@@ -73,6 +73,22 @@ export function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [eventsByThread, setEventsByThread] = useState<Record<string, ThreadEvent[]>>({});
   const [terminalByThread, setTerminalByThread] = useState<Record<string, string>>({});
+  const [liveSubagents, setLiveSubagents] = useState<
+    Record<
+      string,
+      {
+        stage?: "spawning" | "initializing" | "running";
+        thought: string;
+        text: string;
+        activeTool?: string;
+        tools: string[];
+      }
+    >
+  >({});
+  const [liveToolByThread, setLiveToolByThread] = useState<
+    Record<string, { toolName: string; summary: string } | null>
+  >({});
+  const [cancellingThreads, setCancellingThreads] = useState<Record<string, boolean>>({});
   const [diffState, setDiffState] = useState<{ files: Array<{ status: string; path: string }>; diff: string }>({
     files: [],
     diff: "",
@@ -226,11 +242,78 @@ export function App() {
             ...prev,
             threads: [thr, ...prev.threads.filter((th) => th.id !== thr.id)],
           }));
+          if (thr.status !== "running" && thr.status !== "waiting_approval") {
+            setCancellingThreads((prev) => (prev[thr.id] ? { ...prev, [thr.id]: false } : prev));
+          }
         } else if (msg.type === "thread_event") {
           const te = msg.payload as ThreadEvent;
           setEventsByThread((prev) => ({
             ...prev,
             [te.threadId]: [...(prev[te.threadId] ?? []), te],
+          }));
+        } else if (msg.type === "subagent_status") {
+          const p = msg.payload as {
+            childId: string;
+            stage: "spawning" | "initializing" | "running";
+          };
+          setLiveSubagents((prev) => {
+            const cur = prev[p.childId] ?? { thought: "", text: "", tools: [] };
+            return { ...prev, [p.childId]: { ...cur, stage: p.stage } };
+          });
+        } else if (msg.type === "subagent_stream") {
+          const p = msg.payload as {
+            childId: string;
+            stream: "text" | "thought";
+            text: string;
+          };
+          setLiveSubagents((prev) => {
+            const cur = prev[p.childId] ?? { stage: "running" as const, thought: "", text: "", tools: [] };
+            return {
+              ...prev,
+              [p.childId]: {
+                ...cur,
+                stage: "running",
+                thought: p.stream === "thought" ? cur.thought + p.text : cur.thought,
+                text: p.stream === "text" ? cur.text + p.text : cur.text,
+              },
+            };
+          });
+        } else if (msg.type === "subagent_tool") {
+          const p = msg.payload as {
+            childId: string;
+            phase: "start" | "end";
+            toolName: string;
+            summary: string;
+          };
+          const label =
+            p.summary && p.summary !== p.toolName ? `${p.toolName} ${p.summary}` : p.toolName;
+          setLiveSubagents((prev) => {
+            const cur = prev[p.childId] ?? { stage: "running" as const, thought: "", text: "", tools: [] };
+            const nextTools =
+              p.phase === "start" ? [...cur.tools.slice(-11), label] : cur.tools;
+            return {
+              ...prev,
+              [p.childId]: {
+                ...cur,
+                stage: "running",
+                activeTool: p.phase === "start" ? label : undefined,
+                tools: nextTools,
+              },
+            };
+          });
+        } else if (msg.type === "tool_activity") {
+          const p = msg.payload as {
+            threadId: string;
+            phase: "start" | "end" | "clear";
+            toolName?: string;
+            summary?: string;
+          };
+          setLiveToolByThread((prev) => ({
+            ...prev,
+            [p.threadId]:
+              p.phase === "start" && p.toolName
+                ? { toolName: p.toolName, summary: p.summary ?? p.toolName }
+                : null,
           }));
         } else if (msg.type === "terminal_chunk") {
           const p = msg.payload as { threadId: string; chunk: string };
@@ -434,6 +517,20 @@ export function App() {
     }
   };
 
+  const handleCancelThread = async (threadId: string) => {
+    setCancellingThreads((prev) => ({ ...prev, [threadId]: true }));
+    try {
+      const r = await api<{ ok: boolean; state?: HubStateSnapshot }>(
+        `/api/threads/${encodeURIComponent(threadId)}/cancel`,
+        { method: "POST" },
+      );
+      if (r.state) applyStateSnapshot(r.state);
+    } catch (err) {
+      setCancellingThreads((prev) => ({ ...prev, [threadId]: false }));
+      notify(t("toast.cancelFailed", { msg: (err as Error).message }));
+    }
+  };
+
   const handleApproval = async (id: string, approved: boolean, scope: "once" | "session" = "once") => {
     try {
       await api(`/api/approvals/${id}`, {
@@ -592,10 +689,40 @@ export function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events.length]);
 
-  // Collapse consecutive text_delta / thought_delta chunks into readable message bubbles
+  // Collapse consecutive text_delta / thought_delta chunks and merge subagent_started + subagent_completed by childId
   const renderedFeed = useMemo(() => {
-    const blocks: Array<{ kind: string; text?: string; payload: Record<string, unknown>; id: number }> = [];
+    const blocks: Array<{
+      kind: string;
+      text?: string;
+      payload: Record<string, unknown>;
+      completedPayload?: Record<string, unknown>;
+      id: number;
+    }> = [];
+    const subagentIndexByChildId = new Map<string, number>();
+
     for (const ev of events) {
+      if (ev.kind === "subagent_started") {
+        const childId = typeof ev.payload.childId === "string" ? ev.payload.childId : undefined;
+        const idx = blocks.length;
+        blocks.push({ id: ev.id, kind: "subagent", payload: ev.payload });
+        if (childId) subagentIndexByChildId.set(childId, idx);
+        continue;
+      }
+      if (ev.kind === "subagent_completed") {
+        const childId = typeof ev.payload.childId === "string" ? ev.payload.childId : undefined;
+        const existingIdx = childId ? subagentIndexByChildId.get(childId) : undefined;
+        if (existingIdx !== undefined && blocks[existingIdx]) {
+          blocks[existingIdx]!.completedPayload = ev.payload;
+        } else {
+          blocks.push({
+            id: ev.id,
+            kind: "subagent",
+            payload: ev.payload,
+            completedPayload: ev.payload,
+          });
+        }
+        continue;
+      }
       const last = blocks[blocks.length - 1];
       if (
         (ev.kind === "text_delta" || ev.kind === "thought_delta") &&
@@ -1030,25 +1157,94 @@ export function App() {
                     </div>
                   );
                 }
-                if (b.kind === "subagent_started" || b.kind === "subagent_completed") {
+                if (b.kind === "subagent") {
+                  const childId = String(b.payload.childId ?? "");
+                  const live = childId ? liveSubagents[childId] : undefined;
+                  const done = b.completedPayload;
+                  const isRunning = !done;
+                  const isCancelled = Boolean(done?.cancelled);
+                  const isFailed = Boolean(done && done.ok === false);
+                  const modelLabel = String(done?.model ?? b.payload.model ?? "default");
+                  const effortLabel = String(done?.effort ?? b.payload.effort ?? "auto");
+                  const profileLabel = String(done?.profileId ?? b.payload.profileId ?? "");
+                  const taskText = typeof b.payload.task === "string" ? b.payload.task : "";
+                  const streamText =
+                    live?.text ||
+                    (typeof done?.text === "string" ? done.text : "") ||
+                    (typeof done?.preview === "string" ? done.preview : "");
+                  const stageLabel =
+                    live?.stage === "spawning"
+                      ? t("feed.subagentSpawning")
+                      : live?.stage === "initializing"
+                        ? t("feed.subagentInitializing")
+                        : t("feed.subagentRunning");
+
                   return (
-                    <div key={b.id} className="subagent-card">
+                    <div
+                      key={b.id}
+                      className={`subagent-card ${isRunning ? "running" : isFailed ? "failed" : ""}`}
+                    >
                       <div className="subagent-head">
-                        <span>
+                        <span className="subagent-title">
+                          <span
+                            className={`dot ${
+                              isRunning ? "warn pulse" : isFailed ? "err" : "ok"
+                            }`}
+                          />
                           {t("feed.subagent")} <strong>{String(b.payload.subagentName)}</strong>
                         </span>
                         <span className="badge">
-                          {String(b.payload.profileId ?? "")} · {String(b.payload.model ?? "default")} ·{" "}
-                          {String(b.payload.effort ?? "auto")}
+                          {profileLabel} · {modelLabel} · {effortLabel}
                         </span>
                       </div>
-                      {b.kind === "subagent_completed" && (
-                        <div className="muted-sm">
-                          {t("feed.subagentCompleted", {
-                            tokens: String(b.payload.offloadedTokens ?? 0),
-                          })}
+                      {taskText && (
+                        <div className="subagent-task" title={taskText}>
+                          {taskText}
                         </div>
                       )}
+                      {isRunning && (
+                        <div className="muted-sm">
+                          {stageLabel}
+                          {live?.activeTool && (
+                            <span className="subagent-tool"> · ⚙ {live.activeTool}</span>
+                          )}
+                        </div>
+                      )}
+                      {live?.thought && (
+                        <details className="subagent-thought" open={isRunning && !streamText}>
+                          <summary>{t("feed.thinking")}</summary>
+                          <pre className="msg-text">{live.thought}</pre>
+                        </details>
+                      )}
+                      {streamText &&
+                        (isRunning ? (
+                          <pre className="subagent-stream">{streamText}</pre>
+                        ) : (
+                          <details className="subagent-thought">
+                            <summary>{t("feed.subagentOutput")}</summary>
+                            <pre className="subagent-stream">{streamText}</pre>
+                          </details>
+                        ))}
+                      {done && (
+                        <div className={isFailed ? "subagent-err" : "muted-sm"}>
+                          {isCancelled
+                            ? t("feed.subagentCancelled")
+                            : isFailed
+                              ? t("feed.subagentFailed", {
+                                  msg: String(done.error ?? t("feed.unknownError")),
+                                })
+                              : t("feed.subagentCompleted", {
+                                  tokens: String(done.offloadedTokens ?? 0),
+                                })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                if (b.kind === "turn_cancelled") {
+                  return (
+                    <div key={b.id} className="turn-cancelled">
+                      ⏹ {t("feed.turnCancelled")}
                     </div>
                   );
                 }
@@ -1063,6 +1259,23 @@ export function App() {
                 }
                 return null;
               })}
+
+              {activeThread.status === "running" && (
+                <div className="live-activity-bar">
+                  <span className="dot warn pulse" />
+                  <span>{t("feed.runningStatus")}</span>
+                  {liveToolByThread[activeThread.id] && (
+                    <span className="live-activity-tool">
+                      ⚙ {liveToolByThread[activeThread.id]!.toolName}
+                      {liveToolByThread[activeThread.id]!.summary &&
+                      liveToolByThread[activeThread.id]!.summary !==
+                        liveToolByThread[activeThread.id]!.toolName
+                        ? ` ${liveToolByThread[activeThread.id]!.summary}`
+                        : ""}
+                    </span>
+                  )}
+                </div>
+              )}
 
               {/* Pending local permission approvals */}
               {state.pendingApprovals.map((req) => (
@@ -1343,12 +1556,14 @@ export function App() {
                   {t("composer.subagents")}
                 </button>
 
-                {activeThread.status === "running" ? (
+                {activeThread.status === "running" || activeThread.status === "waiting_approval" ? (
                   <button
                     className="btn danger sm"
-                    onClick={() => void api(`/api/threads/${activeThread.id}/cancel`, { method: "POST" })}
+                    onClick={() => void handleCancelThread(activeThread.id)}
                   >
-                    {t("composer.cancel")}
+                    {cancellingThreads[activeThread.id]
+                      ? t("composer.stopping")
+                      : t("composer.cancel")}
                   </button>
                 ) : (
                   <button className="btn primary sm" onClick={() => void handleSendPrompt()}>
