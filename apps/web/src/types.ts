@@ -5,11 +5,15 @@ export interface HostState {
   name: string;
   transport: "tailnet-direct" | "tailscale-ssh" | "openssh" | "local";
   endpoint: string;
+  sshTarget?: string;
   authMode: "tailscale-serve" | "tailscaled-whois" | "dev-token" | "none";
+  hasBearerToken?: boolean;
   maxSessions: number;
   connected: boolean;
   rttMs?: number;
+  peerUser?: string;
   activeSessions: number;
+  lastError?: string;
   probe?: {
     hostname: string;
     os: string;

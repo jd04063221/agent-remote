@@ -45,6 +45,7 @@ import {
 } from "@agent-remote/tool-plane";
 import {
   LocalProcessChannel,
+  normalizeTailnetEndpoint,
   SshSessionChannel,
   TailnetDirectClient,
   type NodeProbeResult,
@@ -95,6 +96,7 @@ export class AgentRemoteHub {
 
   private readonly clients = new Map<string, TailnetDirectClient>();
   private readonly probeCache = new Map<string, NodeProbeResult>();
+  private readonly hostErrors = new Map<string, string>();
   private readonly runtimes = new Map<string, ActiveRuntime>();
   private readonly pendingApprovals = new Map<
     string,
@@ -119,7 +121,8 @@ export class AgentRemoteHub {
           id,
           name: h.name ?? id,
           transport: h.transport,
-          endpoint: h.endpoint,
+          endpoint:
+            h.transport === "tailnet-direct" ? normalizeTailnetEndpoint(h.endpoint) : h.endpoint,
           authMode: h.auth,
           bearerToken: h.bearer_token,
           sshTarget: h.ssh_target,
@@ -217,13 +220,17 @@ export class AgentRemoteHub {
   getFullState() {
     const hosts = this.store.listHosts().map((h) => {
       const client = this.clients.get(h.id);
+      const status = client?.getStatus();
       return {
         ...h,
         bearerToken: h.bearerToken ? "***" : undefined,
+        hasBearerToken: Boolean(h.bearerToken),
         connected: h.transport === "local" ? true : (client?.isConnected() ?? false),
-        rttMs: client?.getStatus().rttMs,
-        activeSessions: client?.getStatus().activeSessions ?? 0,
+        rttMs: status?.rttMs,
+        peerUser: status?.node?.peerUser,
+        activeSessions: status?.activeSessions ?? 0,
         probe: this.probeCache.get(h.id),
+        lastError: this.hostErrors.get(h.id),
       };
     });
 
@@ -246,30 +253,75 @@ export class AgentRemoteHub {
   async connectHost(hostId: string): Promise<NodeProbeResult | null> {
     const host = this.store.getHost(hostId);
     if (!host) throw new Error(`Unknown host: ${hostId}`);
-    if (host.transport === "local") return null;
+
+    if (host.transport === "local") {
+      this.hostErrors.delete(hostId);
+      this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      return null;
+    }
+
+    if (host.transport === "tailscale-ssh" || host.transport === "openssh") {
+      if (!host.sshTarget?.trim()) {
+        const err = new Error(`Host "${host.id}" (${host.transport}) requires an SSH target`);
+        this.hostErrors.set(hostId, err.message);
+        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+        throw err;
+      }
+      this.hostErrors.delete(hostId);
+      this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      return null;
+    }
+
+    const normalizedEndpoint = normalizeTailnetEndpoint(host.endpoint);
+    if (!normalizedEndpoint) {
+      const err = new Error(`Host "${host.id}" requires an endpoint URL (e.g. wss://<host>.ts.net/v1/ws)`);
+      this.hostErrors.set(hostId, err.message);
+      this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      throw err;
+    }
 
     let client = this.clients.get(hostId);
+    if (client && client.endpoint !== normalizedEndpoint) {
+      client.close();
+      this.clients.delete(hostId);
+      client = undefined;
+    }
+
     if (!client) {
       client = new TailnetDirectClient({
         hostId: host.id,
-        endpoint: host.endpoint,
-        bearerToken: host.bearerToken,
+        endpoint: normalizedEndpoint,
+        bearerToken: host.authMode === "dev-token" ? host.bearerToken : undefined,
       });
-      client.on("connected", () => this.broadcast({ type: "host_updated", payload: { hostId } }));
-      client.on("disconnected", () =>
-        this.broadcast({ type: "host_updated", payload: { hostId } }),
-      );
+      client.on("connected", () => {
+        this.hostErrors.delete(hostId);
+        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      });
+      client.on("disconnected", () => {
+        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      });
       this.clients.set(hostId, client);
     }
 
-    if (!client.isConnected()) {
-      await client.connect();
+    try {
+      if (!client.isConnected()) {
+        await client.connect();
+      }
+      await client.ping();
+      const probe = await client.probe();
+      this.hostErrors.delete(hostId);
+      this.probeCache.set(hostId, probe);
+      this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      return probe;
+    } catch (err) {
+      if (!client.isConnected()) {
+        client.close();
+        this.clients.delete(hostId);
+      }
+      this.hostErrors.set(hostId, (err as Error).message);
+      this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
+      throw err;
     }
-    await client.ping();
-    const probe = await client.probe();
-    this.probeCache.set(hostId, probe);
-    this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-    return probe;
   }
 
   async refreshProfileModels(profileId: string): Promise<CatalogSnapshot> {
@@ -1059,9 +1111,49 @@ export class AgentRemoteHub {
 
       if (pathname === "/api/hosts" && req.method === "POST") {
         const body = (await readJsonBody(req)) as HostRecord;
-        this.store.upsertHost(body);
-        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-        return sendJson(res, 200, { ok: true, host: body });
+        const id = body.id?.trim();
+        if (!id) {
+          return sendJson(res, 400, { error: "Host ID is required" });
+        }
+        const existing = this.store.getHost(id);
+        const transport = body.transport ?? "tailnet-direct";
+        const authMode = body.authMode ?? "tailscale-serve";
+        const endpoint =
+          transport === "tailnet-direct"
+            ? normalizeTailnetEndpoint(body.endpoint ?? "")
+            : (body.endpoint ?? "").trim();
+        let bearerToken: string | undefined;
+        if (authMode === "dev-token") {
+          const incomingToken = body.bearerToken?.trim();
+          bearerToken =
+            !incomingToken || incomingToken === "***" ? existing?.bearerToken : incomingToken;
+        }
+        const normalizedHost: HostRecord = {
+          id,
+          name: body.name?.trim() || id,
+          transport,
+          endpoint,
+          authMode,
+          bearerToken,
+          sshTarget: body.sshTarget?.trim() || undefined,
+          maxSessions: Number(body.maxSessions) > 0 ? Number(body.maxSessions) : 8,
+        };
+        // Evict stale transport client / cached probe / error when host config changes
+        this.clients.get(id)?.close();
+        this.clients.delete(id);
+        this.probeCache.delete(id);
+        this.hostErrors.delete(id);
+        this.store.upsertHost(normalizedHost);
+        const state = this.getFullState();
+        this.broadcast({ type: "state_snapshot", payload: state });
+        return sendJson(res, 200, {
+          ok: true,
+          host: {
+            ...normalizedHost,
+            bearerToken: normalizedHost.bearerToken ? "***" : undefined,
+          },
+          state,
+        });
       }
 
       const hostMatch = /^\/api\/hosts\/([^/]+)(\/(connect|probe))?$/.exec(pathname);
@@ -1069,23 +1161,48 @@ export class AgentRemoteHub {
         const hostId = decodeURIComponent(hostMatch[1]!);
         const action = hostMatch[3];
         if (req.method === "DELETE" && !action) {
+          for (const [tid, rt] of this.runtimes.entries()) {
+            if (rt.hostId === hostId) {
+              rt.abortController.abort();
+              rt.channel.kill();
+              for (const c of rt.localMcpClients) c.close();
+              await rt.localHttpMcp?.close();
+              this.runtimes.delete(tid);
+            }
+          }
           this.clients.get(hostId)?.close();
           this.clients.delete(hostId);
+          this.probeCache.delete(hostId);
+          this.hostErrors.delete(hostId);
           this.store.deleteHost(hostId);
-          this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-          return sendJson(res, 200, { ok: true });
+          const state = this.getFullState();
+          this.broadcast({ type: "state_snapshot", payload: state });
+          return sendJson(res, 200, { ok: true, state });
         }
         if (req.method === "POST" && (action === "connect" || action === "probe")) {
           const probe = await this.connectHost(hostId);
-          return sendJson(res, 200, { ok: true, probe });
+          return sendJson(res, 200, { ok: true, probe, state: this.getFullState() });
         }
       }
 
       if (pathname === "/api/profiles" && req.method === "POST") {
         const body = (await readJsonBody(req)) as ProfileRecord;
-        this.store.upsertProfile(body);
-        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-        return sendJson(res, 200, { ok: true, profile: body });
+        const id = body.id?.trim();
+        if (!id) {
+          return sendJson(res, 400, { error: "Profile ID is required" });
+        }
+        const normalizedProfile: ProfileRecord = {
+          ...body,
+          id,
+          name: body.name?.trim() || id,
+          hostId: body.hostId?.trim(),
+          remoteBin: body.remoteBin?.trim() || undefined,
+          defaultModel: body.defaultModel?.trim() || undefined,
+        };
+        this.store.upsertProfile(normalizedProfile);
+        const state = this.getFullState();
+        this.broadcast({ type: "state_snapshot", payload: state });
+        return sendJson(res, 200, { ok: true, profile: normalizedProfile, state });
       }
 
       const profMatch = /^\/api\/profiles\/([^/]+)(\/(refresh-models|refresh-quota))?$/.exec(pathname);
@@ -1093,8 +1210,9 @@ export class AgentRemoteHub {
         const profileId = decodeURIComponent(profMatch[1]!);
         if (req.method === "DELETE" && !profMatch[2]) {
           this.store.deleteProfile(profileId);
-          this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-          return sendJson(res, 200, { ok: true });
+          const state = this.getFullState();
+          this.broadcast({ type: "state_snapshot", payload: state });
+          return sendJson(res, 200, { ok: true, state });
         }
         if (req.method === "POST" && profMatch[3] === "refresh-models") {
           const snapshot = await this.refreshProfileModels(profileId);
@@ -1109,15 +1227,17 @@ export class AgentRemoteHub {
       if (pathname === "/api/subagents" && req.method === "POST") {
         const bp = (await readJsonBody(req)) as SubagentBlueprint;
         this.store.upsertBlueprint(bp);
-        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-        return sendJson(res, 200, { ok: true, blueprint: bp });
+        const state = this.getFullState();
+        this.broadcast({ type: "state_snapshot", payload: state });
+        return sendJson(res, 200, { ok: true, blueprint: bp, state });
       }
 
       const subDel = /^\/api\/subagents\/([^/]+)$/.exec(pathname);
       if (subDel && req.method === "DELETE") {
         this.store.deleteBlueprint(decodeURIComponent(subDel[1]!));
-        this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-        return sendJson(res, 200, { ok: true });
+        const state = this.getFullState();
+        this.broadcast({ type: "state_snapshot", payload: state });
+        return sendJson(res, 200, { ok: true, state });
       }
 
       if (pathname === "/api/threads" && req.method === "POST") {
@@ -1138,11 +1258,18 @@ export class AgentRemoteHub {
           return sendJson(res, 200, { thread, events: this.store.listEvents(threadId) });
         }
         if (req.method === "DELETE" && !action) {
-          this.runtimes.get(threadId)?.channel.kill();
-          this.runtimes.delete(threadId);
+          const rt = this.runtimes.get(threadId);
+          if (rt) {
+            rt.abortController.abort();
+            rt.channel.kill();
+            for (const c of rt.localMcpClients) c.close();
+            await rt.localHttpMcp?.close();
+            this.runtimes.delete(threadId);
+          }
           this.store.deleteThread(threadId);
-          this.broadcast({ type: "state_snapshot", payload: this.getFullState() });
-          return sendJson(res, 200, { ok: true });
+          const state = this.getFullState();
+          this.broadcast({ type: "state_snapshot", payload: state });
+          return sendJson(res, 200, { ok: true, state });
         }
         if (req.method === "POST" && action === "prompt") {
           const body = (await readJsonBody(req)) as Parameters<AgentRemoteHub["sendPrompt"]>[1];

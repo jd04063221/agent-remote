@@ -256,6 +256,9 @@ export class HubStore {
   }
 
   deleteHost(id: string): void {
+    this.db.prepare("DELETE FROM model_catalogs WHERE host_id = ?").run(id);
+    this.db.prepare("DELETE FROM quota_snapshots WHERE host_id = ?").run(id);
+    this.db.prepare("DELETE FROM profiles WHERE host_id = ?").run(id);
     this.db.prepare("DELETE FROM hosts WHERE id = ?").run(id);
   }
 
@@ -301,6 +304,8 @@ export class HubStore {
   }
 
   deleteProfile(id: string): void {
+    this.db.prepare("DELETE FROM model_catalogs WHERE profile_id = ?").run(id);
+    this.db.prepare("DELETE FROM quota_snapshots WHERE profile_id = ?").run(id);
     this.db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
   }
 

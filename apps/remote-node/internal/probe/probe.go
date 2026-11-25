@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/protocol"
@@ -149,20 +150,26 @@ func ResolveBinary(bin string) (string, error) {
 
 func RunHostProbe(ctx context.Context, activeSessions, maxSessions int) protocol.ProbeResPayload {
 	hostname, _ := os.Hostname()
-	agents := make([]protocol.AgentProbeItem, 0, len(defaultAgents))
+	agents := make([]protocol.AgentProbeItem, len(defaultAgents))
 
-	for _, ka := range defaultAgents {
-		item := protocol.AgentProbeItem{
-			Agent:  ka.kind,
-			Binary: ka.binary,
-		}
-		if p, err := ResolveBinary(ka.binary); err == nil {
-			item.Installed = true
-			item.BinaryPath = p
-			item.Version = readVersion(ctx, p)
-		}
-		agents = append(agents, item)
+	var wg sync.WaitGroup
+	for i, ka := range defaultAgents {
+		wg.Add(1)
+		go func(idx int, k knownAgent) {
+			defer wg.Done()
+			item := protocol.AgentProbeItem{
+				Agent:  k.kind,
+				Binary: k.binary,
+			}
+			if p, err := ResolveBinary(k.binary); err == nil {
+				item.Installed = true
+				item.BinaryPath = p
+				item.Version = readVersion(ctx, p)
+			}
+			agents[idx] = item
+		}(i, ka)
 	}
+	wg.Wait()
 
 	return protocol.ProbeResPayload{
 		Hostname:       hostname,

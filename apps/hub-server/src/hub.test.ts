@@ -92,9 +92,87 @@ describe("AgentRemoteHub + Go remote-node live integration", () => {
       const probeBody = (await probeRes.json()) as {
         ok: boolean;
         probe: { agents: Array<{ agent: string; installed: boolean }> };
+        state: { hosts: Array<{ id: string; connected: boolean; rttMs?: number }> };
       };
       expect(probeBody.ok).toBe(true);
       expect(probeBody.probe.agents.some((a) => a.agent === "antigravity")).toBe(true);
+      const liveHost = probeBody.state.hosts.find((h) => h.id === "test-vps");
+      expect(liveHost?.connected).toBe(true);
+      expect(typeof liveHost?.rttMs).toBe("number");
     }
+
+    // 4. Normalizes endpoint URL, surfaces error on bad token, evicts stale client on edit, and cascades on delete
+    const badHostRes = await fetch(`${hubUrl}/api/hosts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "edit-vps",
+        name: "Editable Node",
+        transport: "tailnet-direct",
+        endpoint: `http://127.0.0.1:${nodePort}/healthz`,
+        authMode: "dev-token",
+        bearerToken: "wrong-token",
+        maxSessions: 4,
+      }),
+    });
+    expect(badHostRes.status).toBe(200);
+    const badHostJson = (await badHostRes.json()) as { host: { endpoint: string } };
+    expect(badHostJson.host.endpoint).toBe(`ws://127.0.0.1:${nodePort}/v1/ws`);
+
+    await fetch(`${hubUrl}/api/profiles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "edit-prof",
+        name: "Temp Profile",
+        hostId: "edit-vps",
+        agent: "antigravity",
+      }),
+    });
+
+    if (nodeProc) {
+      const failProbe = await fetch(`${hubUrl}/api/hosts/edit-vps/probe`, { method: "POST" });
+      expect(failProbe.status).toBe(500);
+      const errState = (await (await fetch(`${hubUrl}/api/state`)).json()) as {
+        hosts: Array<{ id: string; connected: boolean; lastError?: string }>;
+      };
+      const failingHost = errState.hosts.find((h) => h.id === "edit-vps");
+      expect(failingHost?.connected).toBe(false);
+      expect(failingHost?.lastError).toMatch(/HTTP 401/);
+
+      // Edit host with correct token -> stale client evicted, probe succeeds & clears lastError
+      const fixRes = await fetch(`${hubUrl}/api/hosts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "edit-vps",
+          name: "Editable Node",
+          transport: "tailnet-direct",
+          endpoint: `http://127.0.0.1:${nodePort}`,
+          authMode: "dev-token",
+          bearerToken: devToken,
+          maxSessions: 4,
+        }),
+      });
+      expect(fixRes.status).toBe(200);
+      const fixedProbe = await fetch(`${hubUrl}/api/hosts/edit-vps/probe`, { method: "POST" });
+      expect(fixedProbe.status).toBe(200);
+      const fixedJson = (await fixedProbe.json()) as {
+        state: { hosts: Array<{ id: string; connected: boolean; lastError?: string }> };
+      };
+      const okHost = fixedJson.state.hosts.find((h) => h.id === "edit-vps");
+      expect(okHost?.connected).toBe(true);
+      expect(okHost?.lastError).toBeUndefined();
+    }
+
+    // Delete host cascades its profiles
+    const delRes = await fetch(`${hubUrl}/api/hosts/edit-vps`, { method: "DELETE" });
+    expect(delRes.status).toBe(200);
+    const afterDel = (await delRes.json()) as {
+      ok: boolean;
+      state: { hosts: Array<{ id: string }>; profiles: Array<{ id: string }> };
+    };
+    expect(afterDel.state.hosts.some((h) => h.id === "edit-vps")).toBe(false);
+    expect(afterDel.state.profiles.some((p) => p.id === "edit-prof")).toBe(false);
   });
 });

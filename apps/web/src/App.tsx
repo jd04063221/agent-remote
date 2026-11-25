@@ -10,7 +10,9 @@ import {
 import type {
   ApprovalRequest,
   CatalogSnapshot,
+  HostState,
   HubStateSnapshot,
+  ProfileState,
   QuotaSnapshot,
   SubagentOverride,
   ThinkingEffort,
@@ -18,6 +20,15 @@ import type {
 } from "./types";
 
 const ALL_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const DEFAULT_BIN_BY_AGENT: Record<string, string> = {
+  antigravity: "agy",
+  opencode: "opencode",
+  claude: "claude",
+  codex: "codex",
+  gemini: "gemini",
+  kiro: "kiro-cli",
+  "factory-droid": "droid",
+};
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -85,22 +96,29 @@ export function App() {
   });
   const [toast, setToast] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
+  const [connectingHosts, setConnectingHosts] = useState<Record<string, boolean>>({});
+  const [confirmDelete, setConfirmDelete] = useState<
+    null | { kind: "host" | "profile" | "thread"; id: string }
+  >(null);
+  const [editingHostId, setEditingHostId] = useState<string | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
 
   // Form drafts
   const [hostDraft, setHostDraft] = useState({
     id: "us-vps",
     name: "US Tailnet Node",
     transport: "tailnet-direct",
-    endpoint: "ws://127.0.0.1:19420/v1/ws",
+    endpoint: "",
     sshTarget: "",
-    authMode: "dev-token",
+    authMode: "tailscale-serve",
     bearerToken: "",
+    hasBearerToken: false,
     maxSessions: 8,
   });
   const [profileDraft, setProfileDraft] = useState({
     id: "us-agy",
     name: "Antigravity @ US",
-    hostId: "us-vps",
+    hostId: "",
     agent: "antigravity",
     remoteBin: "agy",
     defaultModel: "",
@@ -115,83 +133,126 @@ export function App() {
     ephemeralRemote: false,
   });
 
-  const notify = (msg: string) => {
+  const toastTimerRef = useRef<number | null>(null);
+  const notify = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 4000);
-  };
-
-  // Connect WebSocket to Local Hub
-  useEffect(() => {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
-    ws.onopen = () => setWsConnected(true);
-    ws.onclose = () => setWsConnected(false);
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown };
-      if (msg.type === "state_snapshot") {
-        const snap = msg.payload as HubStateSnapshot;
-        setState(snap);
-        if (snap.localEnv?.defaultWorkspaceRoot) {
-          setThreadDraft((prev) =>
-            prev.workspaceRoot ? prev : { ...prev, workspaceRoot: snap.localEnv!.defaultWorkspaceRoot },
-          );
-        }
-      } else if (msg.type === "catalog_updated") {
-        const snap = msg.payload as CatalogSnapshot;
-        setState((prev) => ({
-          ...prev,
-          catalogs: [
-            ...prev.catalogs.filter(
-              (c) => !(c.hostId === snap.hostId && c.profileId === snap.profileId),
-            ),
-            snap,
-          ],
-        }));
-      } else if (msg.type === "quota_updated") {
-        const snap = msg.payload as QuotaSnapshot;
-        setState((prev) => ({
-          ...prev,
-          quotas: [
-            ...(prev.quotas ?? []).filter(
-              (q) => !(q.hostId === snap.hostId && q.profileId === snap.profileId),
-            ),
-            snap,
-          ],
-        }));
-      } else if (msg.type === "thread_created" || msg.type === "thread_updated") {
-        const thr = msg.payload as HubStateSnapshot["threads"][number];
-        setState((prev) => ({
-          ...prev,
-          threads: [thr, ...prev.threads.filter((t) => t.id !== thr.id)],
-        }));
-      } else if (msg.type === "thread_event") {
-        const te = msg.payload as ThreadEvent;
-        setEventsByThread((prev) => ({
-          ...prev,
-          [te.threadId]: [...(prev[te.threadId] ?? []), te],
-        }));
-      } else if (msg.type === "terminal_chunk") {
-        const p = msg.payload as { threadId: string; chunk: string };
-        setTerminalByThread((prev) => ({
-          ...prev,
-          [p.threadId]: (prev[p.threadId] ?? "") + p.chunk,
-        }));
-      } else if (msg.type === "approval_requested") {
-        const req = msg.payload as ApprovalRequest;
-        setState((prev) => ({
-          ...prev,
-          pendingApprovals: [...prev.pendingApprovals, req],
-        }));
-      } else if (msg.type === "approval_resolved") {
-        const { id } = msg.payload as { id: string };
-        setState((prev) => ({
-          ...prev,
-          pendingApprovals: prev.pendingApprovals.filter((a) => a.id !== id),
-        }));
-      }
-    };
-    return () => ws.close();
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 5000);
   }, []);
+
+  const applyStateSnapshot = useCallback((snap: HubStateSnapshot) => {
+    setState(snap);
+    if (snap.localEnv?.defaultWorkspaceRoot) {
+      setThreadDraft((prev) =>
+        prev.workspaceRoot ? prev : { ...prev, workspaceRoot: snap.localEnv!.defaultWorkspaceRoot },
+      );
+    }
+  }, []);
+
+  const refreshState = useCallback(async () => {
+    try {
+      const snap = await api<HubStateSnapshot>("/api/state");
+      applyStateSnapshot(snap);
+    } catch {
+      // ignore transient hub restart errors; WS reconnect will sync
+    }
+  }, [applyStateSnapshot]);
+
+  // Connect WebSocket to Local Hub (with automatic reconnect + initial HTTP snapshot)
+  useEffect(() => {
+    let closed = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    void refreshState();
+
+    const connectWs = () => {
+      if (closed) return;
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+      ws.onopen = () => {
+        setWsConnected(true);
+      };
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (!closed) {
+          reconnectTimer = window.setTimeout(connectWs, 2000);
+        }
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown };
+        if (msg.type === "state_snapshot") {
+          applyStateSnapshot(msg.payload as HubStateSnapshot);
+        } else if (msg.type === "host_updated") {
+          void refreshState();
+        } else if (msg.type === "catalog_updated") {
+          const snap = msg.payload as CatalogSnapshot;
+          setState((prev) => ({
+            ...prev,
+            catalogs: [
+              ...prev.catalogs.filter(
+                (c) => !(c.hostId === snap.hostId && c.profileId === snap.profileId),
+              ),
+              snap,
+            ],
+          }));
+        } else if (msg.type === "quota_updated") {
+          const snap = msg.payload as QuotaSnapshot;
+          setState((prev) => ({
+            ...prev,
+            quotas: [
+              ...(prev.quotas ?? []).filter(
+                (q) => !(q.hostId === snap.hostId && q.profileId === snap.profileId),
+              ),
+              snap,
+            ],
+          }));
+        } else if (msg.type === "thread_created" || msg.type === "thread_updated") {
+          const thr = msg.payload as HubStateSnapshot["threads"][number];
+          setState((prev) => ({
+            ...prev,
+            threads: [thr, ...prev.threads.filter((th) => th.id !== thr.id)],
+          }));
+        } else if (msg.type === "thread_event") {
+          const te = msg.payload as ThreadEvent;
+          setEventsByThread((prev) => ({
+            ...prev,
+            [te.threadId]: [...(prev[te.threadId] ?? []), te],
+          }));
+        } else if (msg.type === "terminal_chunk") {
+          const p = msg.payload as { threadId: string; chunk: string };
+          setTerminalByThread((prev) => ({
+            ...prev,
+            [p.threadId]: (prev[p.threadId] ?? "") + p.chunk,
+          }));
+        } else if (msg.type === "approval_requested") {
+          const req = msg.payload as ApprovalRequest;
+          setState((prev) => ({
+            ...prev,
+            pendingApprovals: [...prev.pendingApprovals, req],
+          }));
+        } else if (msg.type === "approval_resolved") {
+          const { id } = msg.payload as { id: string };
+          setState((prev) => ({
+            ...prev,
+            pendingApprovals: prev.pendingApprovals.filter((a) => a.id !== id),
+          }));
+        }
+      };
+    };
+
+    connectWs();
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, [applyStateSnapshot, refreshState]);
 
   // Load events & diff when active or compare thread changes
   useEffect(() => {
@@ -295,11 +356,140 @@ export function App() {
     }
   };
 
+  const openNewHostModal = () => {
+    setEditingHostId(null);
+    setHostDraft({
+      id: state.hosts.length === 0 ? "us-vps" : "",
+      name: state.hosts.length === 0 ? "Tailnet Remote Node" : "",
+      transport: "tailnet-direct",
+      endpoint: "",
+      sshTarget: "",
+      authMode: "tailscale-serve",
+      bearerToken: "",
+      hasBearerToken: false,
+      maxSessions: 8,
+    });
+    setModal("host");
+  };
+
+  const openEditHostModal = (h: HostState) => {
+    setEditingHostId(h.id);
+    setHostDraft({
+      id: h.id,
+      name: h.name,
+      transport: h.transport,
+      endpoint: h.endpoint,
+      sshTarget: h.sshTarget ?? "",
+      authMode: h.authMode,
+      bearerToken: "",
+      hasBearerToken: Boolean(h.hasBearerToken),
+      maxSessions: h.maxSessions || 8,
+    });
+    setModal("host");
+  };
+
+  const openNewProfileModal = (preferredHostId?: string) => {
+    const defaultHostId = preferredHostId || state.hosts[0]?.id || "";
+    setEditingProfileId(null);
+    setProfileDraft({
+      id: state.profiles.length === 0 ? "remote-agy" : "",
+      name: state.profiles.length === 0 ? "Antigravity" : "",
+      hostId: defaultHostId,
+      agent: "antigravity",
+      remoteBin: "agy",
+      defaultModel: "",
+      defaultEffort: "high",
+    });
+    setModal("profile");
+  };
+
+  const openEditProfileModal = (p: ProfileState) => {
+    setEditingProfileId(p.id);
+    setProfileDraft({
+      id: p.id,
+      name: p.name,
+      hostId: p.hostId,
+      agent: p.agent,
+      remoteBin: p.remoteBin ?? DEFAULT_BIN_BY_AGENT[p.agent] ?? "",
+      defaultModel: p.defaultModel ?? "",
+      defaultEffort: p.defaultEffort ?? "high",
+    });
+    setModal("profile");
+  };
+
+  const handleProbeHost = async (hostId: string, hostName: string) => {
+    setConnectingHosts((prev) => ({ ...prev, [hostId]: true }));
+    try {
+      const r = await api<{ ok: boolean; state?: HubStateSnapshot }>(
+        `/api/hosts/${encodeURIComponent(hostId)}/probe`,
+        { method: "POST" },
+      );
+      if (r.state) applyStateSnapshot(r.state);
+      else await refreshState();
+      notify(t("toast.connectedProbed", { name: hostName }));
+    } catch (e) {
+      await refreshState();
+      notify(t("toast.probeFailed", { msg: (e as Error).message }));
+    } finally {
+      setConnectingHosts((prev) => ({ ...prev, [hostId]: false }));
+    }
+  };
+
+  const handleDeleteHost = async (h: HostState) => {
+    try {
+      const r = await api<{ ok: boolean; state?: HubStateSnapshot }>(
+        `/api/hosts/${encodeURIComponent(h.id)}`,
+        { method: "DELETE" },
+      );
+      if (r.state) applyStateSnapshot(r.state);
+      else await refreshState();
+      setConfirmDelete(null);
+      if (editingHostId === h.id) setModal(null);
+      notify(t("toast.deletedHost", { name: h.name }));
+    } catch (e) {
+      notify(t("toast.deleteFailed", { msg: (e as Error).message }));
+    }
+  };
+
+  const handleDeleteProfile = async (p: ProfileState) => {
+    try {
+      const r = await api<{ ok: boolean; state?: HubStateSnapshot }>(
+        `/api/profiles/${encodeURIComponent(p.id)}`,
+        { method: "DELETE" },
+      );
+      if (r.state) applyStateSnapshot(r.state);
+      else await refreshState();
+      setConfirmDelete(null);
+      if (editingProfileId === p.id) setModal(null);
+      notify(t("toast.deletedProfile", { name: p.name }));
+    } catch (e) {
+      notify(t("toast.deleteFailed", { msg: (e as Error).message }));
+    }
+  };
+
+  const handleDeleteThread = async (threadId: string, title: string) => {
+    try {
+      const r = await api<{ ok: boolean; state?: HubStateSnapshot }>(
+        `/api/threads/${encodeURIComponent(threadId)}`,
+        { method: "DELETE" },
+      );
+      if (r.state) applyStateSnapshot(r.state);
+      else await refreshState();
+      setConfirmDelete(null);
+      if (activeThreadId === threadId) setActiveThreadId(null);
+      if (compareThreadId === threadId) setCompareThreadId(null);
+      notify(t("toast.deletedThread", { title }));
+    } catch (e) {
+      notify(t("toast.deleteFailed", { msg: (e as Error).message }));
+    }
+  };
+
   const openNewThreadModal = () => {
     setThreadDraft((d) => ({
       ...d,
       title: d.title || t("modal.thread.defaultTitle"),
-      profileId: d.profileId || state.profiles[0]?.id || "",
+      profileId:
+        state.profiles.some((p) => p.id === d.profileId) ? d.profileId : (state.profiles[0]?.id || ""),
     }));
     setModal("thread");
   };
@@ -379,6 +569,7 @@ export function App() {
           )}
           {state.threads.map((th) => {
             const prof = state.profiles.find((p) => p.id === th.profileId);
+            const isConfirming = confirmDelete?.kind === "thread" && confirmDelete.id === th.id;
             return (
               <div
                 key={th.id}
@@ -386,8 +577,35 @@ export function App() {
                 onClick={() => setActiveThreadId(th.id)}
               >
                 <div className="thread-row">
-                  <span className={`dot ${th.status === "running" ? "warn" : th.status === "waiting_approval" ? "err" : "ok"}`} />
-                  <span className="thread-title">{th.title}</span>
+                  <span className="thread-title-wrap">
+                    <span className={`dot ${th.status === "running" ? "warn" : th.status === "waiting_approval" ? "err" : "ok"}`} />
+                    <span className="thread-title">{th.title}</span>
+                  </span>
+                  {isConfirming ? (
+                    <span className="fleet-actions" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        className="btn danger xs"
+                        onClick={() => void handleDeleteThread(th.id, th.title)}
+                      >
+                        {t("sidebar.confirmDelete")}
+                      </button>
+                      <button className="btn ghost xs" onClick={() => setConfirmDelete(null)}>
+                        ×
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      className="btn danger-ghost xs"
+                      title={t("sidebar.deleteThreadTooltip")}
+                      aria-label={t("sidebar.deleteThreadTooltip")}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete({ kind: "thread", id: th.id });
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
                 <div className="thread-meta">
                   <span>{prof?.agent ?? th.profileId}@{th.hostId}</span>
@@ -404,65 +622,151 @@ export function App() {
           <div className="section-head">
             <span>{t("sidebar.fleet", { count: state.hosts.length })}</span>
             <div className="inline-actions">
-              <button className="btn ghost xs" onClick={() => setModal("host")}>
+              <button className="btn ghost xs" onClick={openNewHostModal}>
                 {t("sidebar.addHost")}
               </button>
-              <button className="btn ghost xs" onClick={() => setModal("profile")}>
+              <button className="btn ghost xs" onClick={() => openNewProfileModal()}>
                 {t("sidebar.addAgent")}
               </button>
             </div>
           </div>
           {state.hosts.map((h) => {
             const hostProfiles = state.profiles.filter((p) => p.hostId === h.id);
+            const isConnecting = Boolean(connectingHosts[h.id]);
+            const isConfirmingHost = confirmDelete?.kind === "host" && confirmDelete.id === h.id;
+            const installedAgents = h.probe?.agents.filter((a) => a.installed) ?? [];
             return (
               <div key={h.id} className="fleet-card">
                 <div className="fleet-head">
-                  <span>
-                    <span className={`dot ${h.connected ? "ok" : "muted"}`} />
+                  <span className="fleet-name" title={`${h.name} (${h.id})`}>
+                    <span className={`dot ${h.connected ? "ok" : h.lastError ? "err" : "muted"}`} />
                     <strong>{h.name}</strong>
                   </span>
-                  <button
-                    className="btn ghost xs"
-                    onClick={async () => {
-                      try {
-                        await api(`/api/hosts/${h.id}/probe`, { method: "POST" });
-                        notify(t("toast.connectedProbed", { name: h.name }));
-                      } catch (e) {
-                        notify(t("toast.probeFailed", { msg: (e as Error).message }));
-                      }
-                    }}
-                  >
-                    {h.rttMs !== undefined ? `${h.rttMs}ms` : t("sidebar.connect")}
-                  </button>
+                  <div className="fleet-actions">
+                    {h.transport === "local" ? (
+                      <span className="badge green">{t("sidebar.localReady")}</span>
+                    ) : h.transport === "tailscale-ssh" || h.transport === "openssh" ? (
+                      <span className="badge">{t("sidebar.sshReady")}</span>
+                    ) : (
+                      <button
+                        className={`btn xs ${h.connected ? "connected" : "ghost"}`}
+                        disabled={isConnecting}
+                        onClick={() => void handleProbeHost(h.id, h.name)}
+                      >
+                        {isConnecting
+                          ? t("sidebar.connecting")
+                          : h.connected
+                            ? h.rttMs !== undefined
+                              ? `✓ ${h.rttMs}ms`
+                              : `✓ ${t("sidebar.connected")}`
+                            : t("sidebar.connect")}
+                      </button>
+                    )}
+                    <button
+                      className="btn ghost xs"
+                      title={t("sidebar.editHostTooltip")}
+                      aria-label={t("sidebar.editHostTooltip")}
+                      onClick={() => openEditHostModal(h)}
+                    >
+                      ✎
+                    </button>
+                    {isConfirmingHost ? (
+                      <>
+                        <button
+                          className="btn danger xs"
+                          onClick={() => void handleDeleteHost(h)}
+                        >
+                          {t("sidebar.confirmDelete")}
+                        </button>
+                        <button className="btn ghost xs" onClick={() => setConfirmDelete(null)}>
+                          ×
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn danger-ghost xs"
+                        title={t("sidebar.deleteHostTooltip")}
+                        aria-label={t("sidebar.deleteHostTooltip")}
+                        onClick={() => setConfirmDelete({ kind: "host", id: h.id })}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="fleet-sub">{h.transport} · {h.endpoint || h.id}</div>
+                <div className="fleet-sub">
+                  {h.transport} · {h.transport === "tailnet-direct" ? h.endpoint || h.id : h.sshTarget || h.id}
+                </div>
+                {h.probe && (
+                  <div className="fleet-probe">
+                    {h.probe.hostname} ({h.probe.os}/{h.probe.arch}) ·{" "}
+                    {t("sidebar.probedAgents", { count: installedAgents.length })}
+                  </div>
+                )}
+                {h.lastError && <div className="fleet-error">{h.lastError}</div>}
                 {hostProfiles.map((p) => {
                   const cat = state.catalogs.find((c) => c.hostId === h.id && c.profileId === p.id);
+                  const isConfirmingProf =
+                    confirmDelete?.kind === "profile" && confirmDelete.id === p.id;
                   return (
                     <div key={p.id} className="profile-row">
-                      <span>{p.name} ({p.agent})</span>
-                      <button
-                        className="btn ghost xs"
-                        title={t("sidebar.modelsTooltip")}
-                        onClick={async () => {
-                          try {
-                            const r = await api<{ snapshot: CatalogSnapshot }>(
-                              `/api/profiles/${p.id}/refresh-models`,
-                              { method: "POST" },
-                            );
-                            notify(
-                              t("toast.loadedModels", {
-                                count: r.snapshot.models.length,
-                                name: p.name,
-                              }),
-                            );
-                          } catch (e) {
-                            notify(t("toast.modelFetchFailed", { msg: (e as Error).message }));
-                          }
-                        }}
-                      >
-                        {cat ? t("sidebar.modelsCount", { count: cat.models.length }) : t("sidebar.models")}
-                      </button>
+                      <span className="profile-name" title={`${p.name} (${p.agent})`}>
+                        {p.name} ({p.agent})
+                      </span>
+                      <div className="profile-actions">
+                        <button
+                          className="btn ghost xs"
+                          title={t("sidebar.modelsTooltip")}
+                          onClick={async () => {
+                            try {
+                              const r = await api<{ snapshot: CatalogSnapshot }>(
+                                `/api/profiles/${encodeURIComponent(p.id)}/refresh-models`,
+                                { method: "POST" },
+                              );
+                              notify(
+                                t("toast.loadedModels", {
+                                  count: r.snapshot.models.length,
+                                  name: p.name,
+                                }),
+                              );
+                            } catch (e) {
+                              notify(t("toast.modelFetchFailed", { msg: (e as Error).message }));
+                            }
+                          }}
+                        >
+                          {cat ? t("sidebar.modelsCount", { count: cat.models.length }) : t("sidebar.models")}
+                        </button>
+                        <button
+                          className="btn ghost xs"
+                          title={t("sidebar.editProfileTooltip")}
+                          aria-label={t("sidebar.editProfileTooltip")}
+                          onClick={() => openEditProfileModal(p)}
+                        >
+                          ✎
+                        </button>
+                        {isConfirmingProf ? (
+                          <>
+                            <button
+                              className="btn danger xs"
+                              onClick={() => void handleDeleteProfile(p)}
+                            >
+                              {t("sidebar.confirmDelete")}
+                            </button>
+                            <button className="btn ghost xs" onClick={() => setConfirmDelete(null)}>
+                              ×
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            className="btn danger-ghost xs"
+                            title={t("sidebar.deleteProfileTooltip")}
+                            aria-label={t("sidebar.deleteProfileTooltip")}
+                            onClick={() => setConfirmDelete({ kind: "profile", id: p.id })}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -528,10 +832,10 @@ export function App() {
             <h2>{t("welcome.title")}</h2>
             <p>{t("welcome.desc")}</p>
             <div className="welcome-steps">
-              <button className="btn primary" onClick={() => setModal("host")}>
+              <button className="btn primary" onClick={openNewHostModal}>
                 {t("welcome.step1")}
               </button>
-              <button className="btn" onClick={() => setModal("profile")}>
+              <button className="btn" onClick={() => openNewProfileModal()}>
                 {t("welcome.step2")}
               </button>
               <button className="btn" onClick={openNewThreadModal}>
@@ -1062,18 +1366,30 @@ export function App() {
       {modal === "host" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{t("modal.host.title")}</h3>
+            <h3>{editingHostId ? t("modal.host.editTitle") : t("modal.host.title")}</h3>
             <label>
               {t("modal.host.id")}
-              <input value={hostDraft.id} onChange={(e) => setHostDraft({ ...hostDraft, id: e.target.value })} />
+              <input
+                disabled={Boolean(editingHostId)}
+                placeholder="us-vps"
+                value={hostDraft.id}
+                onChange={(e) => setHostDraft({ ...hostDraft, id: e.target.value })}
+              />
             </label>
             <label>
               {t("modal.host.name")}
-              <input value={hostDraft.name} onChange={(e) => setHostDraft({ ...hostDraft, name: e.target.value })} />
+              <input
+                placeholder="Tailnet Remote Node"
+                value={hostDraft.name}
+                onChange={(e) => setHostDraft({ ...hostDraft, name: e.target.value })}
+              />
             </label>
             <label>
               {t("modal.host.transport")}
-              <select value={hostDraft.transport} onChange={(e) => setHostDraft({ ...hostDraft, transport: e.target.value })}>
+              <select
+                value={hostDraft.transport}
+                onChange={(e) => setHostDraft({ ...hostDraft, transport: e.target.value })}
+              >
                 <option value="tailnet-direct">{t("modal.host.transportTailnet")}</option>
                 <option value="tailscale-ssh">{t("modal.host.transportTailscaleSsh")}</option>
                 <option value="openssh">{t("modal.host.transportOpenssh")}</option>
@@ -1083,7 +1399,12 @@ export function App() {
             {hostDraft.transport === "tailnet-direct" && (
               <label>
                 {t("modal.host.endpoint")}
-                <input value={hostDraft.endpoint} onChange={(e) => setHostDraft({ ...hostDraft, endpoint: e.target.value })} />
+                <input
+                  placeholder="wss://<host>.<tailnet>.ts.net/v1/ws"
+                  value={hostDraft.endpoint}
+                  onChange={(e) => setHostDraft({ ...hostDraft, endpoint: e.target.value })}
+                />
+                <span className="field-hint">{t("modal.host.endpointHint")}</span>
               </label>
             )}
             {(hostDraft.transport === "tailscale-ssh" || hostDraft.transport === "openssh") && (
@@ -1100,7 +1421,10 @@ export function App() {
               <>
                 <label>
                   {t("modal.host.authMode")}
-                  <select value={hostDraft.authMode} onChange={(e) => setHostDraft({ ...hostDraft, authMode: e.target.value })}>
+                  <select
+                    value={hostDraft.authMode}
+                    onChange={(e) => setHostDraft({ ...hostDraft, authMode: e.target.value })}
+                  >
                     <option value="tailscale-serve">{t("modal.host.authServe")}</option>
                     <option value="tailscaled-whois">{t("modal.host.authWhois")}</option>
                     <option value="dev-token">{t("modal.host.authToken")}</option>
@@ -1109,25 +1433,69 @@ export function App() {
                 {hostDraft.authMode === "dev-token" && (
                   <label>
                     {t("modal.host.bearerToken")}
-                    <input type="password" value={hostDraft.bearerToken} onChange={(e) => setHostDraft({ ...hostDraft, bearerToken: e.target.value })} />
+                    <input
+                      type="password"
+                      placeholder={
+                        editingHostId && hostDraft.hasBearerToken
+                          ? t("modal.host.bearerTokenKeepHint")
+                          : ""
+                      }
+                      value={hostDraft.bearerToken}
+                      onChange={(e) => setHostDraft({ ...hostDraft, bearerToken: e.target.value })}
+                    />
                   </label>
                 )}
               </>
             )}
             <div className="modal-actions">
+              {editingHostId && (() => {
+                const target = state.hosts.find((x) => x.id === editingHostId);
+                return target ? (
+                  <>
+                    <button
+                      className="btn danger"
+                      onClick={() => void handleDeleteHost(target)}
+                    >
+                      {t("modal.host.delete")}
+                    </button>
+                    <span className="spacer" />
+                  </>
+                ) : null;
+              })()}
               <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
-                  await api("/api/hosts", {
-                    method: "POST",
-                    body: JSON.stringify({
-                      ...hostDraft,
-                      sshTarget: hostDraft.sshTarget.trim() || undefined,
-                    }),
-                  });
-                  setModal(null);
-                  notify(t("toast.savedHost", { name: hostDraft.name }));
+                  const hostId = hostDraft.id.trim();
+                  if (!hostId) return notify(t("toast.hostIdRequired"));
+                  const hostName = hostDraft.name.trim() || hostId;
+                  try {
+                    const r = await api<{ ok: boolean; state?: HubStateSnapshot }>("/api/hosts", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        id: hostId,
+                        name: hostName,
+                        transport: hostDraft.transport,
+                        endpoint: hostDraft.endpoint.trim(),
+                        sshTarget: hostDraft.sshTarget.trim() || undefined,
+                        authMode: hostDraft.authMode,
+                        bearerToken:
+                          hostDraft.authMode === "dev-token"
+                            ? hostDraft.bearerToken.trim() || undefined
+                            : undefined,
+                        maxSessions: hostDraft.maxSessions,
+                      }),
+                    });
+                    if (r.state) applyStateSnapshot(r.state);
+                    setModal(null);
+                    setEditingHostId(null);
+                    notify(t("toast.savedHost", { name: hostName }));
+                    if (hostDraft.transport === "tailnet-direct" && hostDraft.endpoint.trim()) {
+                      void handleProbeHost(hostId, hostName);
+                    }
+                  } catch (e) {
+                    notify(t("toast.saveFailed", { msg: (e as Error).message }));
+                  }
                 }}
               >
                 {t("modal.host.save")}
@@ -1140,18 +1508,30 @@ export function App() {
       {modal === "profile" && (
         <div className="modal-backdrop" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{t("modal.profile.title")}</h3>
+            <h3>{editingProfileId ? t("modal.profile.editTitle") : t("modal.profile.title")}</h3>
             <label>
               {t("modal.profile.id")}
-              <input value={profileDraft.id} onChange={(e) => setProfileDraft({ ...profileDraft, id: e.target.value })} />
+              <input
+                disabled={Boolean(editingProfileId)}
+                placeholder="remote-agy"
+                value={profileDraft.id}
+                onChange={(e) => setProfileDraft({ ...profileDraft, id: e.target.value })}
+              />
             </label>
             <label>
               {t("modal.profile.name")}
-              <input value={profileDraft.name} onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} />
+              <input
+                placeholder="Antigravity"
+                value={profileDraft.name}
+                onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })}
+              />
             </label>
             <label>
               {t("modal.profile.host")}
-              <select value={profileDraft.hostId} onChange={(e) => setProfileDraft({ ...profileDraft, hostId: e.target.value })}>
+              <select
+                value={profileDraft.hostId}
+                onChange={(e) => setProfileDraft({ ...profileDraft, hostId: e.target.value })}
+              >
                 {state.hosts.map((h) => (
                   <option key={h.id} value={h.id}>{h.name} ({h.id})</option>
                 ))}
@@ -1159,7 +1539,21 @@ export function App() {
             </label>
             <label>
               {t("modal.profile.agent")}
-              <select value={profileDraft.agent} onChange={(e) => setProfileDraft({ ...profileDraft, agent: e.target.value })}>
+              <select
+                value={profileDraft.agent}
+                onChange={(e) => {
+                  const nextAgent = e.target.value;
+                  setProfileDraft((prev) => ({
+                    ...prev,
+                    agent: nextAgent,
+                    remoteBin:
+                      !editingProfileId &&
+                      (!prev.remoteBin || prev.remoteBin === DEFAULT_BIN_BY_AGENT[prev.agent])
+                        ? (DEFAULT_BIN_BY_AGENT[nextAgent] ?? prev.remoteBin)
+                        : prev.remoteBin,
+                  }));
+                }}
+              >
                 <option value="antigravity">Antigravity CLI (agy)</option>
                 <option value="opencode">OpenCode (opencode)</option>
                 <option value="claude">Claude Code (claude)</option>
@@ -1178,13 +1572,45 @@ export function App() {
               <input value={profileDraft.defaultModel} onChange={(e) => setProfileDraft({ ...profileDraft, defaultModel: e.target.value })} />
             </label>
             <div className="modal-actions">
+              {editingProfileId && (() => {
+                const target = state.profiles.find((x) => x.id === editingProfileId);
+                return target ? (
+                  <>
+                    <button
+                      className="btn danger"
+                      onClick={() => void handleDeleteProfile(target)}
+                    >
+                      {t("modal.profile.delete")}
+                    </button>
+                    <span className="spacer" />
+                  </>
+                ) : null;
+              })()}
               <button className="btn" onClick={() => setModal(null)}>{t("common.cancel")}</button>
               <button
                 className="btn primary"
                 onClick={async () => {
-                  await api("/api/profiles", { method: "POST", body: JSON.stringify(profileDraft) });
-                  setModal(null);
-                  notify(t("toast.savedProfile", { name: profileDraft.name }));
+                  const profId = profileDraft.id.trim();
+                  const targetHostId = profileDraft.hostId || state.hosts[0]?.id || "";
+                  if (!profId || !targetHostId) return notify(t("toast.profileIdRequired"));
+                  const profName = profileDraft.name.trim() || profId;
+                  try {
+                    const r = await api<{ ok: boolean; state?: HubStateSnapshot }>("/api/profiles", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        ...profileDraft,
+                        id: profId,
+                        name: profName,
+                        hostId: targetHostId,
+                      }),
+                    });
+                    if (r.state) applyStateSnapshot(r.state);
+                    setModal(null);
+                    setEditingProfileId(null);
+                    notify(t("toast.savedProfile", { name: profName }));
+                  } catch (e) {
+                    notify(t("toast.saveFailed", { msg: (e as Error).message }));
+                  }
                 }}
               >
                 {t("modal.profile.save")}

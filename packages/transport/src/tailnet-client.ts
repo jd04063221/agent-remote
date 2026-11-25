@@ -9,6 +9,42 @@ import type {
   SpawnSessionPayload,
 } from "@agent-remote/protocol";
 
+/**
+ * Normalizes user-entered Tailnet / local node URLs into a valid WebSocket `/v1/ws` endpoint.
+ * Examples:
+ * - `https://box.tail.ts.net` -> `wss://box.tail.ts.net/v1/ws`
+ * - `https://box.tail.ts.net/healthz` -> `wss://box.tail.ts.net/v1/ws`
+ * - `wss://box.tail.ts.net/` -> `wss://box.tail.ts.net/v1/ws`
+ * - `box.tail.ts.net` -> `wss://box.tail.ts.net/v1/ws`
+ * - `127.0.0.1:19420` -> `ws://127.0.0.1:19420/v1/ws`
+ */
+export function normalizeTailnetEndpoint(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+
+  let candidate = trimmed;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(candidate)) {
+    const isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(candidate);
+    candidate = `${isLoopback ? "ws" : "wss"}://${candidate}`;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "https:") {
+      parsed.protocol = "wss:";
+    } else if (parsed.protocol === "http:") {
+      parsed.protocol = "ws:";
+    }
+    const cleanPath = parsed.pathname.replace(/\/+$/, "");
+    if (cleanPath === "" || cleanPath === "/healthz") {
+      parsed.pathname = "/v1/ws";
+    }
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
 export interface TailnetClientOptions {
   hostId: string;
   endpoint: string;
@@ -145,6 +181,8 @@ export class TailnetDirectClient extends EventEmitter {
   private closedByUser = false;
   private helloAck?: NodeHelloAck;
   private lastRttMs?: number;
+  private connectPromise?: Promise<NodeHelloAck>;
+  private reconnectTimer?: NodeJS.Timeout;
 
   private readonly pending = new Map<
     string,
@@ -156,7 +194,7 @@ export class TailnetDirectClient extends EventEmitter {
   constructor(options: TailnetClientOptions) {
     super();
     this.hostId = options.hostId;
-    this.endpoint = options.endpoint;
+    this.endpoint = normalizeTailnetEndpoint(options.endpoint);
     this.autoReconnect = options.autoReconnect ?? true;
     this.headers = { ...(options.headers ?? {}) };
     if (options.bearerToken) {
@@ -179,19 +217,74 @@ export class TailnetDirectClient extends EventEmitter {
     };
   }
 
-  async connect(): Promise<NodeHelloAck> {
+  async connect(timeoutMs = 12_000): Promise<NodeHelloAck> {
+    if (this.connected && this.helloAck) {
+      return this.helloAck;
+    }
+    if (this.connectPromise) {
+      return await this.connectPromise;
+    }
     this.closedByUser = false;
-    return await new Promise<NodeHelloAck>((resolve, reject) => {
-      const ws = new WebSocket(this.endpoint, { headers: this.headers });
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+
+    const promise = new Promise<NodeHelloAck>((resolve, reject) => {
+      if (!this.endpoint) {
+        reject(new Error("Remote endpoint URL is empty"));
+        return;
+      }
+
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(this.endpoint, {
+          headers: this.headers,
+          handshakeTimeout: timeoutMs,
+        });
+      } catch (err) {
+        reject(new Error(`Invalid WebSocket endpoint "${this.endpoint}": ${(err as Error).message}`));
+        return;
+      }
       this.ws = ws;
 
       let settled = false;
+      const connectTimer = setTimeout(() => {
+        if (!settled) {
+          fail(new Error(`Timed out after ${timeoutMs}ms connecting to ${this.endpoint}`));
+          try {
+            ws.terminate();
+          } catch {
+            // ignore terminate error
+          }
+        }
+      }, timeoutMs);
+      connectTimer.unref?.();
+
+      const clearTimer = () => clearTimeout(connectTimer);
+
       const fail = (err: Error) => {
         if (!settled) {
           settled = true;
+          clearTimer();
           reject(err);
         }
       };
+
+      ws.on("unexpected-response", (_req, res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          if (body.length < 512) body += chunk;
+        });
+        res.on("end", () => {
+          const detail = body.trim() || res.statusMessage || "WebSocket upgrade rejected";
+          fail(new Error(`HTTP ${res.statusCode ?? 0} from ${this.endpoint}: ${detail}`));
+        });
+        res.on("error", () => {
+          fail(new Error(`HTTP ${res.statusCode ?? 0} from ${this.endpoint}: ${res.statusMessage || "WebSocket upgrade rejected"}`));
+        });
+      });
 
       ws.on("error", (err) => fail(err));
 
@@ -205,6 +298,7 @@ export class TailnetDirectClient extends EventEmitter {
 
         if (frame.type === "hello_ack" && !settled) {
           settled = true;
+          clearTimer();
           this.connected = true;
           this.helloAck = frame.payload as NodeHelloAck;
           this.emit("connected", this.helloAck);
@@ -217,31 +311,65 @@ export class TailnetDirectClient extends EventEmitter {
         this.handleIncomingFrame(frame);
       });
 
-      ws.on("close", () => {
+      ws.on("close", (code, reasonBuf) => {
+        clearTimer();
         const wasConnected = this.connected;
         this.connected = false;
         this.rejectPending(new Error("Tailnet WSS connection closed"));
         if (wasConnected) {
           this.emit("disconnected");
         } else {
-          fail(new Error("WebSocket closed before hello_ack"));
+          const reason = reasonBuf?.toString("utf8").trim();
+          fail(
+            new Error(
+              reason
+                ? `WebSocket closed before hello_ack (code ${code}: ${reason})`
+                : `WebSocket closed before hello_ack (code ${code})`,
+            ),
+          );
         }
-        if (this.autoReconnect && !this.closedByUser) {
-          setTimeout(() => {
+        if (wasConnected && this.autoReconnect && !this.closedByUser) {
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
             if (!this.closedByUser && !this.connected) {
               void this.connect().catch(() => {});
             }
-          }, 2000).unref();
+          }, 2000);
+          this.reconnectTimer.unref();
         }
       });
     });
+
+    this.connectPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.connectPromise === promise) {
+        this.connectPromise = undefined;
+      }
+    }
   }
 
   close(): void {
     this.closedByUser = true;
     this.connected = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.rejectPending(new Error("Client closed"));
-    this.ws?.close();
+    if (this.ws) {
+      try {
+        if (this.ws.readyState === WebSocket.CONNECTING) {
+          this.ws.terminate();
+        } else {
+          this.ws.close();
+        }
+      } catch {
+        // ignore close errors
+      }
+      this.ws = undefined;
+    }
   }
 
   async ping(): Promise<number> {

@@ -355,9 +355,10 @@ async function main(): Promise<void> {
     case "models": {
       const endpoint = getFlag("--endpoint");
       const agent = getFlag("--agent", "antigravity")!;
+      const remoteBin = getFlag("--remote-bin");
       if (!endpoint) {
         console.error(
-          "Usage: ar models --endpoint wss://<node>.ts.net/v1/ws [--agent antigravity] [--token ...]",
+          "Usage: ar models --endpoint wss://<node>.ts.net/v1/ws [--agent antigravity] [--remote-bin /snap/bin/agy] [--token ...]",
         );
         process.exit(1);
       }
@@ -368,22 +369,29 @@ async function main(): Promise<void> {
         autoReconnect: false,
       });
       await client.connect();
-      const raw = await client.discoverCatalogRaw(agent);
-      if (raw.error && !raw.rawOutput) {
-        console.error("Catalog probe failed:", raw.error);
+      const raw = await client.discoverCatalogRaw(agent, remoteBin);
+      client.close();
+      if (raw.error) {
+        console.error("Catalog probe error:", raw.error);
+        if (raw.rawOutput?.trim()) {
+          console.error(raw.rawOutput.trim());
+        }
         process.exit(1);
       }
       if (agent === "antigravity") {
         const parsed = parseAgyModelsOutput(raw.rawOutput);
-        for (const m of parsed) {
-          console.log(
-            `${m.id.padEnd(32)} ${m.displayName.padEnd(28)} efforts=[${m.capabilities.supportedEfforts.join(",")}]`,
-          );
+        if (parsed.length === 0 && raw.rawOutput?.trim()) {
+          console.log(raw.rawOutput.trim());
+        } else {
+          for (const m of parsed) {
+            console.log(
+              `${m.id.padEnd(32)} ${m.displayName.padEnd(28)} efforts=[${m.capabilities.supportedEfforts.join(",")}]`,
+            );
+          }
         }
       } else {
         console.log(raw.rawOutput);
       }
-      client.close();
       break;
     }
 
