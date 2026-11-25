@@ -78,7 +78,7 @@ export const AgentRemoteConfigSchema = z.object({
       db_path: z.string().optional(),
       ephemeral_remote: z.boolean().default(false),
     })
-    .default({}),
+    .prefault({}),
   hosts: z.record(z.string(), HostEntrySchema).default({}),
   profiles: z.record(z.string(), ProfileEntrySchema).default({}),
   subagents: z.record(z.string(), SubagentEntrySchema).default({}),
@@ -90,7 +90,7 @@ export const AgentRemoteConfigSchema = z.object({
       ask: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),
     })
-    .default({}),
+    .prefault({}),
   local_mcp: z.record(z.string(), LocalMcpEntrySchema).default({}),
 });
 

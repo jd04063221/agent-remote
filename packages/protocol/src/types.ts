@@ -59,7 +59,7 @@ export const ModelCatalogEntrySchema = z.object({
   isDefault: z.boolean().optional(),
   aliases: z.array(z.string()).optional(),
   /** Maps canonical effort level -> concrete backend model slug when effort is encoded in model ID (e.g. agy). */
-  effortVariantMap: z.record(ThinkingEffortSchema, z.string()).optional(),
+  effortVariantMap: z.partialRecord(ThinkingEffortSchema, z.string()).optional(),
   inputModalities: z.array(z.enum(["text", "image", "audio", "pdf"])).optional(),
   contextWindow: z.number().int().positive().optional(),
   capabilities: z.object({
