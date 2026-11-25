@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app, BrowserWindow, Notification } from "electron";
@@ -6,11 +7,19 @@ import { AgentRemoteHub } from "@agent-remote/hub-server";
 let hub: AgentRemoteHub | undefined;
 let mainWindow: BrowserWindow | undefined;
 
+function resolveWebDistDir(): string {
+  const packagedWeb = path.join(process.resourcesPath ?? "", "web");
+  if (app.isPackaged && fs.existsSync(packagedWeb)) {
+    return packagedWeb;
+  }
+  return path.resolve(import.meta.dirname, "../../web/dist");
+}
+
 async function createWindow(): Promise<void> {
   const dbPath =
     process.env.AGENT_REMOTE_DB ??
     path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
-  const webDistDir = path.resolve(import.meta.dirname, "../../web/dist");
+  const webDistDir = resolveWebDistDir();
   const port = Number(process.env.AGENT_REMOTE_PORT ?? 3775);
 
   hub = new AgentRemoteHub({ dbPath, webDistDir });

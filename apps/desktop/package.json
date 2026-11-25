@@ -8,7 +8,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "electron ./dist/main.js",
-    "clean": "rm -rf dist"
+    "dist:mac": "electron-builder --config electron-builder.yml --mac",
+    "dist:win": "electron-builder --config electron-builder.yml --win",
+    "dist:linux": "electron-builder --config electron-builder.yml --linux",
+    "clean": "rm -rf dist release"
   },
   "dependencies": {
     "@agent-remote/hub-server": "workspace:*"

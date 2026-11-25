@@ -28,6 +28,7 @@ declare module "electron" {
   }
 
   export const app: {
+    readonly isPackaged?: boolean;
     whenReady(): Promise<void>;
     on(event: string, listener: (...args: unknown[]) => void): void;
     quit(): void;

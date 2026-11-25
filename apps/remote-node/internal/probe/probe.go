@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -77,7 +78,7 @@ func DiscoverCatalog(ctx context.Context, req protocol.CatalogReqPayload) protoc
 	case "factory-droid":
 		home, _ := os.UserHomeDir()
 		if home != "" {
-			if data, err := os.ReadFile(home + "/.factory/settings.json"); err == nil {
+			if data, err := os.ReadFile(filepath.Join(home, ".factory", "settings.json")); err == nil {
 				res.RawOutput = string(data)
 				return res
 			}

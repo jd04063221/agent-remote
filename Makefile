@@ -17,10 +17,12 @@ go-build:
 
 go-build-all:
 	cd apps/remote-node && mkdir -p bin && \
-	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-linux-amd64  ./cmd/agent-remote-node && \
-	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-linux-arm64  ./cmd/agent-remote-node && \
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-darwin-arm64 ./cmd/agent-remote-node && \
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-darwin-amd64 ./cmd/agent-remote-node
+	CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-linux-amd64      ./cmd/agent-remote-node && \
+	CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-linux-arm64      ./cmd/agent-remote-node && \
+	CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-darwin-arm64     ./cmd/agent-remote-node && \
+	CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-darwin-amd64     ./cmd/agent-remote-node && \
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-windows-amd64.exe ./cmd/agent-remote-node && \
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o bin/agent-remote-node-windows-arm64.exe ./cmd/agent-remote-node
 
 go-test:
 	cd apps/remote-node && go test -v ./...

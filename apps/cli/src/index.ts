@@ -161,7 +161,11 @@ async function main(): Promise<void> {
       const port = Number(getFlag("--port", "3775"));
       const host = getFlag("--host", "127.0.0.1")!;
       const dbPath = getDefaultDbPath(getFlag("--db") ?? cfg.hub.db_path);
-      const webDistDir = path.resolve(import.meta.dirname, "../../web/dist");
+      const webCandidates = [
+        path.resolve(import.meta.dirname, "../web/dist"),
+        path.resolve(import.meta.dirname, "../../web/dist"),
+      ];
+      const webDistDir = webCandidates.find((p) => fs.existsSync(p)) ?? webCandidates[1]!;
 
       const hub = new AgentRemoteHub({ dbPath, webDistDir });
       const info = await hub.listen(port, host);
