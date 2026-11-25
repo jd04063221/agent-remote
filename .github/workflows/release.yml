@@ -95,6 +95,7 @@ jobs:
             csc_auto_discovery: "false"
             artifact_glob: |
               desktop-stage/desktop/release/*.exe
+              desktop-stage/desktop/release/*.zip
           - os: ubuntu-latest
             eb_flag: --linux
             csc_auto_discovery: "false"

@@ -453,7 +453,7 @@ pnpm --filter @agent-remote/desktop add -D electron@35 electron-builder@25
 # macOS (.dmg + .zip)
 pnpm --filter @agent-remote/desktop dist:mac
 
-# Windows (NSIS .exe + portable)
+# Windows (NSIS .exe + portable .zip)
 pnpm --filter @agent-remote/desktop dist:win
 
 # Linux (.AppImage + .deb)

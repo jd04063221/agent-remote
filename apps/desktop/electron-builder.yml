@@ -29,11 +29,12 @@ mac:
         - arm64
         - x64
 win:
+  artifactName: "agent-remote-${version}-windows-${arch}-portable.${ext}"
   target:
     - target: nsis
       arch:
         - x64
-    - target: portable
+    - target: zip
       arch:
         - x64
 linux:
@@ -58,5 +59,3 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   include: packaging/installer.nsh
-portable:
-  artifactName: "agent-remote-${version}-windows-${arch}-portable.${ext}"
