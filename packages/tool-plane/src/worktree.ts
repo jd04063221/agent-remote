@@ -41,11 +41,11 @@ export class WorktreeManager {
 
   async listWorktrees(): Promise<WorktreeInfo[]> {
     const out = await this.git(["worktree", "list", "--porcelain"]);
-    const blocks = out.trim().split(/\n\n+/).filter(Boolean);
+    const blocks = out.trim().split(/\r?\n\r?\n+/).filter(Boolean);
     const items: WorktreeInfo[] = [];
 
     for (let i = 0; i < blocks.length; i++) {
-      const lines = blocks[i]!.split("\n");
+      const lines = blocks[i]!.split(/\r?\n/);
       let wtPath = "";
       let head = "";
       let branch = "detached";
@@ -90,7 +90,7 @@ export class WorktreeManager {
   async getStatus(cwd = this.repoRoot): Promise<ChangedFileEntry[]> {
     const out = await this.git(["status", "--porcelain=v1"], cwd);
     return out
-      .split("\n")
+      .split(/\r?\n/)
       .filter((line) => line.length >= 4)
       .map((line) => ({
         status: line.slice(0, 2).trim() || "M",

@@ -21,6 +21,7 @@ func main() {
 	allowedUsers := flag.String("allowed-users", "", "Comma-separated allowed Tailscale user logins (empty = any peer in tailnet)")
 	devToken := flag.String("dev-token", os.Getenv("AGENT_REMOTE_DEV_TOKEN"), "Bearer token for dev-token mode")
 	tailscaledSock := flag.String("tailscaled-sock", "/var/run/tailscale/tailscaled.sock", "Path to tailscaled Unix socket")
+	workBaseDir := flag.String("work-base-dir", os.Getenv("AGENT_REMOTE_WORK_BASE_DIR"), "Base directory for per-session isolated workdirs (auto-switches to Snap-shared dir for /snap/bin/* CLIs)")
 	maxSessions := flag.Int("max-sessions", 16, "Maximum concurrent remote agent sessions")
 	flag.Parse()
 
@@ -41,6 +42,7 @@ func main() {
 	nodeSrv := server.New(server.Config{
 		Auth:        authenticator,
 		MaxSessions: *maxSessions,
+		WorkBaseDir: strings.TrimSpace(*workBaseDir),
 	})
 
 	httpSrv := &http.Server{

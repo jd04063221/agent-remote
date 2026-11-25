@@ -39,6 +39,9 @@ const HARD_DENY_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /(^|[;&|]\s*)mkfs(\.[a-z0-9]+)?\s+/, reason: "filesystem formatting blocked" },
   { re: /:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;\s*:/, reason: "fork bomb blocked" },
   { re: /(curl|wget)\s+[^|]+\|\s*(ba)?sh(\s|$)/, reason: "piping remote script to shell blocked" },
+  { re: /(^|[;&|]\s*)(remove-item|ri|rd|rmdir)\b.*\s+([a-zA-Z]:\\(\s|$|\*)|\/(\s|$))/i, reason: "destructive Windows root deletion blocked" },
+  { re: /(^|[;&|]\s*)format(\.com)?\s+[a-zA-Z]:/i, reason: "disk formatting blocked" },
+  { re: /(irm|iwr|invoke-restmethod|invoke-webrequest)\s+[^|]+\|\s*(iex|invoke-expression)(\s|$)/i, reason: "piping remote script to PowerShell Invoke-Expression blocked" },
 ];
 
 const SAFE_READONLY_COMMAND_PREFIXES = [

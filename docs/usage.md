@@ -92,15 +92,24 @@ ar --help
    ssh user@your-vps "sudo install -m 0755 /tmp/agent-remote-node /usr/local/bin/agent-remote-node"
    ```
 
-2. **生成并执行 systemd + `tailscale serve` 一键部署脚本**：
+2. **生成并执行一键部署脚本（支持 Linux `systemd` 与 macOS `launchd`）**：
    ```bash
-   # 在本地生成脚本
-   ar node deploy-script --port 19420 --auth tailscale-serve > deploy.sh
+   # Linux 远端（自动以登录用户运行，并把 /snap/bin 与 ~/.local/bin 加入 PATH）
+   ar node deploy-script --os linux --user <你的远端用户名> --port 19420 --auth tailscale-serve > deploy.sh
+   # 可选追加白名单或自定义会话工作基目录：
+   # ar node deploy-script --os linux --user dev --allowed-users you@example.com --work-base-dir /home/dev/ar-sessions > deploy.sh
+
+   # macOS 远端（生成 ~/Library/LaunchAgents/io.agent-remote.node.plist，自动注入 /opt/homebrew/bin）
+   ar node deploy-script --os macos --port 19420 --auth tailscale-serve > deploy-macos.sh
    ```
-   将 `deploy.sh` 放到远端主机执行（若只想允许指定 Tailnet 账号访问，可在 systemd `ExecStart` 追加 `--allowed-users you@example.com`）：
+   将脚本放到远端主机执行：
    ```bash
-   sudo bash deploy.sh
+   bash deploy.sh
    ```
+
+   > **Ubuntu Snap 隔离环境说明**：若远端 `agy` 是通过 Snap 安装的（`/snap/bin/agy`），`agent-remote-node` 会自动识别 Snap 目标并将每会话隔离目录切换到 Snap 与宿主机共享的目录（优先 `$HOME/snap/antigravity-cli/common/ar-sessions`，否则 `$HOME/agent-remote-sessions`），避免命中 Snap 私有 `/tmp` 隔离问题；也支持通过 `--work-base-dir` 手动指定。
+   >
+   > **macOS 远端说明**：推荐使用 `--auth-mode tailscale-serve`；Claude 额度探测已原生兼容 macOS 系统 Keychain（`Claude Code-credentials`），无需明文 `.credentials.json`。
 
 3. **在本地验证连通性**：
    ```bash

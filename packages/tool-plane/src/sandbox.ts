@@ -48,11 +48,13 @@ export class WorkspaceSandbox {
 
     const realCandidate = resolveRealpathWithMissingTail(candidate);
 
-    const insideAllowed = this.allowedRoots.some(
-      (allowed) =>
-        realCandidate === allowed ||
-        realCandidate.startsWith(allowed + path.sep),
-    );
+    const norm = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+    const normCandidate = norm(realCandidate);
+    const insideAllowed = this.allowedRoots.some((allowed) => {
+      const normAllowed = norm(allowed);
+      const prefix = normAllowed.endsWith(path.sep) ? normAllowed : normAllowed + path.sep;
+      return normCandidate === normAllowed || normCandidate.startsWith(prefix);
+    });
     if (!insideAllowed) {
       throw new SandboxViolationError(
         `Path "${inputPath}" resolves to "${realCandidate}", which escapes workspace root "${this.root}".`,

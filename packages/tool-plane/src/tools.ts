@@ -1,7 +1,59 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+
+let cachedWinShell: string | undefined;
+
+/**
+ * Resolves the local shell binary and arguments for `run_command`:
+ * - On Windows (`win32`): uses PowerShell (`pwsh` if available, else `powershell.exe`) with `-NoProfile -NonInteractive -Command`
+ *   (or `AGENT_REMOTE_SHELL` if explicitly overridden by the user).
+ * - On Linux/macOS: uses `bash -lc`.
+ */
+export function resolveLocalShell(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  hasBinary?: (name: string) => boolean,
+): { bin: string; args: string[] } {
+  const override = env.AGENT_REMOTE_SHELL?.trim();
+  if (override) {
+    const lower = path.basename(override).toLowerCase();
+    if (lower.includes("pwsh") || lower.includes("powershell")) {
+      return { bin: override, args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+    }
+    if (lower === "cmd" || lower === "cmd.exe") {
+      return { bin: override, args: ["/d", "/s", "/c", command] };
+    }
+    return { bin: override, args: ["-lc", command] };
+  }
+
+  if (platform === "win32") {
+    const check =
+      hasBinary ??
+      ((name: string) => {
+        try {
+          execFileSync("where", [name], { stdio: "ignore" });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    const shellBin =
+      hasBinary !== undefined
+        ? check("pwsh")
+          ? "pwsh"
+          : "powershell.exe"
+        : (cachedWinShell ??= check("pwsh") ? "pwsh" : "powershell.exe");
+    return {
+      bin: shellBin,
+      args: ["-NoProfile", "-NonInteractive", "-Command", command],
+    };
+  }
+
+  return { bin: "bash", args: ["-lc", command] };
+}
 
 import { createUnifiedDiff } from "./diff.js";
 import {
@@ -523,7 +575,8 @@ export class LocalToolEngine {
     if (gate) return gate;
 
     return await new Promise<ToolCallResult>((resolve) => {
-      const child = spawn("bash", ["-lc", command], {
+      const shell = resolveLocalShell(command);
+      const child = spawn(shell.bin, shell.args, {
         cwd,
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
@@ -550,8 +603,15 @@ export class LocalToolEngine {
         killedReason = reason;
         if (child.pid) {
           try {
-            if (process.platform !== "win32") process.kill(-child.pid, "SIGTERM");
-            else child.kill("SIGTERM");
+            if (process.platform !== "win32") {
+              process.kill(-child.pid, "SIGTERM");
+            } else {
+              // On Windows, terminate the entire spawned PowerShell/subcommand process tree cleanly
+              spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+                stdio: "ignore",
+                windowsHide: true,
+              });
+            }
           } catch {
             // already exited
           }

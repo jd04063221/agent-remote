@@ -2,15 +2,24 @@ package quota
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/jd04063221/agent-remote/apps/remote-node/internal/protocol"
+)
+
+var (
+	claudeOAuthUsageURL     = "https://api.anthropic.com/api/oauth/usage"
+	readMacKeychainOverride func(ctx context.Context) ([]byte, error)
 )
 
 // Fetch queries remaining quota on the remote host using remote-local credentials only.
@@ -48,30 +57,87 @@ func Fetch(ctx context.Context, req protocol.QuotaReqPayload) protocol.QuotaResP
 	}
 }
 
-func fetchClaudeOAuthUsage(ctx context.Context) protocol.QuotaResPayload {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return unavailable("claude", "unable to determine remote home directory")
+type claudeOAuthCreds struct {
+	ClaudeAiOauth struct {
+		AccessToken      string `json:"accessToken"`
+		SubscriptionType string `json:"subscriptionType"`
+	} `json:"claudeAiOauth"`
+}
+
+func parseClaudeCredentialsPayload(raw []byte) (claudeOAuthCreds, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return claudeOAuthCreds{}, errors.New("empty credentials payload")
 	}
-	credPath := filepath.Join(home, ".claude", ".credentials.json")
-	raw, err := os.ReadFile(credPath)
+	// macOS `security find-generic-password -w` hex-encodes payloads containing newlines or non-ASCII bytes.
+	if !strings.HasPrefix(trimmed, "{") {
+		if decoded, err := hex.DecodeString(trimmed); err == nil {
+			trimmed = strings.TrimSpace(string(decoded))
+		}
+	}
+	var creds claudeOAuthCreds
+	if err := json.Unmarshal([]byte(trimmed), &creds); err != nil {
+		return claudeOAuthCreds{}, err
+	}
+	if strings.TrimSpace(creds.ClaudeAiOauth.AccessToken) == "" {
+		return claudeOAuthCreds{}, errors.New("claudeAiOauth.accessToken missing")
+	}
+	return creds, nil
+}
+
+func readClaudeMacOSKeychain(ctx context.Context) ([]byte, error) {
+	if readMacKeychainOverride != nil {
+		return readMacKeychainOverride(ctx)
+	}
+	if runtime.GOOS != "darwin" {
+		return nil, errors.New("not darwin")
+	}
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	// Standard Claude Code macOS Keychain item service name
+	out, err := exec.CommandContext(
+		tctx,
+		"security",
+		"find-generic-password",
+		"-s",
+		"Claude Code-credentials",
+		"-w",
+	).Output()
 	if err != nil {
-		return unavailable("claude", "no remote ~/.claude/.credentials.json found (API-key accounts use per-minute headers instead of subscription pools)")
+		return nil, err
+	}
+	return out, nil
+}
+
+func loadClaudeOAuthCredentials(ctx context.Context) (claudeOAuthCreds, error) {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		credPath := filepath.Join(home, ".claude", ".credentials.json")
+		if raw, err := os.ReadFile(credPath); err == nil {
+			if creds, err := parseClaudeCredentialsPayload(raw); err == nil {
+				return creds, nil
+			}
+		}
 	}
 
-	var creds struct {
-		ClaudeAiOauth struct {
-			AccessToken      string `json:"accessToken"`
-			SubscriptionType string `json:"subscriptionType"`
-		} `json:"claudeAiOauth"`
+	if raw, err := readClaudeMacOSKeychain(ctx); err == nil {
+		return parseClaudeCredentialsPayload(raw)
 	}
-	if err := json.Unmarshal(raw, &creds); err != nil || strings.TrimSpace(creds.ClaudeAiOauth.AccessToken) == "" {
-		return unavailable("claude", "remote Claude OAuth accessToken missing or unreadable")
+
+	if runtime.GOOS == "darwin" {
+		return claudeOAuthCreds{}, errors.New("no remote ~/.claude/.credentials.json or macOS Keychain 'Claude Code-credentials' entry found")
+	}
+	return claudeOAuthCreds{}, errors.New("no remote ~/.claude/.credentials.json found (API-key accounts use per-minute headers instead of subscription pools)")
+}
+
+func fetchClaudeOAuthUsage(ctx context.Context) protocol.QuotaResPayload {
+	creds, err := loadClaudeOAuthCredentials(ctx)
+	if err != nil {
+		return unavailable("claude", err.Error())
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(tctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
+	httpReq, err := http.NewRequestWithContext(tctx, http.MethodGet, claudeOAuthUsageURL, nil)
 	if err != nil {
 		return unavailable("claude", err.Error())
 	}

@@ -404,17 +404,87 @@ async function main(): Promise<void> {
       if (sub === "deploy-script") {
         const port = getFlag("--port", "19420")!;
         const auth = getFlag("--auth", "tailscale-serve")!;
+        const targetOs = getFlag("--os", "linux")!;
+        const runUser = getFlag("--user");
+        const allowedUsers = getFlag("--allowed-users");
+        const workBaseDir = getFlag("--work-base-dir");
+
+        const extraFlags = [
+          allowedUsers ? `--allowed-users ${allowedUsers}` : "",
+          workBaseDir ? `--work-base-dir ${workBaseDir}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        if (targetOs === "macos" || targetOs === "darwin") {
+          const xmlExtraArgs = [
+            ...(allowedUsers ? [`    <string>--allowed-users</string>`, `    <string>${allowedUsers}</string>`] : []),
+            ...(workBaseDir ? [`    <string>--work-base-dir</string>`, `    <string>${workBaseDir}</string>`] : []),
+          ].join("\n");
+          console.log(`#!/usr/bin/env bash
+set -euo pipefail
+# Run on your remote macOS host (as the logged-in user who authenticated agy/claude/codex)
+# after copying agent-remote-node-darwin-* to /usr/local/bin/agent-remote-node
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/agent-remote"
+cat <<EOF > "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.agent-remote.node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/agent-remote-node</string>
+    <string>--listen</string>
+    <string>127.0.0.1:${port}</string>
+    <string>--auth-mode</string>
+    <string>${auth}</string>
+${xmlExtraArgs ? xmlExtraArgs + "\n" : ""}  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/Library/Logs/agent-remote/node.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/Library/Logs/agent-remote/node.stderr.log</string>
+</dict>
+</plist>
+EOF
+launchctl unload "$HOME/Library/LaunchAgents/io.agent-remote.node.plist" 2>/dev/null || true
+launchctl load -w "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
+${auth === "tailscale-serve" ? `tailscale serve --bg https / http://127.0.0.1:${port}` : "# Listening without tailscale serve"}
+echo "Done! Connect via wss://<your-mac>.<your-tailnet>.ts.net/v1/ws"
+`);
+          break;
+        }
+
+        const userLine = runUser
+          ? `User=${runUser}`
+          : `User=\${SUDO_USER:-$(whoami)}`;
         console.log(`#!/usr/bin/env bash
 set -euo pipefail
-# Run on your remote Tailnet Linux server after copying bin/agent-remote-node to /usr/local/bin/agent-remote-node
-cat <<'EOF' | sudo tee /etc/systemd/system/agent-remote-node.service
+# Run on your remote Tailnet Linux server after copying agent-remote-node-linux-* to /usr/local/bin/agent-remote-node
+# Runs under the same user account that logged in to agy / claude / codex so OAuth credentials and /snap/bin are accessible.
+RUN_USER="${runUser ?? "${SUDO_USER:-$(whoami)}"}"
+RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+cat <<EOF | sudo tee /etc/systemd/system/agent-remote-node.service
 [Unit]
 Description=agent-remote Remote Tailnet Node
 After=network-online.target tailscaled.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/agent-remote-node --listen 127.0.0.1:${port} --auth-mode ${auth}
+${runUser ? userLine : "User=${RUN_USER}"}
+Environment="HOME=\${RUN_HOME}"
+Environment="PATH=\${RUN_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+ExecStart=/usr/local/bin/agent-remote-node --listen 127.0.0.1:${port} --auth-mode ${auth}${extraFlags ? " " + extraFlags : ""}
 Restart=always
 RestartSec=2
 
@@ -428,7 +498,7 @@ echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
 `);
         break;
       }
-      console.error("Usage: ar node deploy-script [--port 19420] [--auth tailscale-serve|tailscaled-whois]");
+      console.error("Usage: ar node deploy-script [--os linux|macos] [--user <user>] [--port 19420] [--auth tailscale-serve|tailscaled-whois] [--allowed-users <csv>] [--work-base-dir <dir>]");
       process.exit(1);
     }
 

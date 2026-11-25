@@ -30,6 +30,7 @@ const NodeVersion = "0.1.0"
 type Config struct {
 	Auth        *auth.Authenticator
 	MaxSessions int
+	WorkBaseDir string
 }
 
 type activeConn struct {
@@ -307,7 +308,17 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 	s.nextCh++
 	s.mu.Unlock()
 
-	workdir, err := os.MkdirTemp("", "ar-sess-*")
+	resolvedCmd := req.Command
+	if p, err := probe.ResolveBinary(req.Command); err == nil {
+		resolvedCmd = p
+	}
+
+	workBase, err := resolveWorkBaseDir(s.cfg.WorkBaseDir, resolvedCmd, req.Agent)
+	if err != nil {
+		sendErr(conn, 0, reqID, "workdir_failed", err.Error())
+		return
+	}
+	workdir, err := os.MkdirTemp(workBase, "ar-sess-*")
 	if err != nil {
 		sendErr(conn, 0, reqID, "workdir_failed", err.Error())
 		return
@@ -365,7 +376,7 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 		expandedArgs[i] = replacer.Replace(a)
 	}
 
-	cmd := exec.CommandContext(sessCtx, req.Command, expandedArgs...)
+	cmd := exec.CommandContext(sessCtx, resolvedCmd, expandedArgs...)
 	cmd.Dir = emptyDir
 	env := append([]string{}, os.Environ()...)
 	env = append(env, "AGENT_REMOTE_SESSION_ID="+req.SessionID)
@@ -583,4 +594,83 @@ func sendErr(conn *activeConn, ch int, id, code, msg string) {
 		Type:    protocol.TypeError,
 		Payload: protocol.MustMarshalPayload(protocol.ErrorPayload{Code: code, Message: msg}),
 	})
+}
+
+var knownSnapPackageByBinary = map[string]string{
+	"agy": "antigravity-cli",
+}
+
+// isSnapBinary detects whether a resolved executable path belongs to an Ubuntu Snap package
+// (which runs inside a private /tmp mount namespace and cannot access host /tmp).
+func isSnapBinary(resolvedPath string) bool {
+	if strings.HasPrefix(resolvedPath, "/snap/") || strings.HasPrefix(resolvedPath, "/var/lib/snapd/snap/") {
+		return true
+	}
+	if target, err := os.Readlink(resolvedPath); err == nil {
+		if strings.HasSuffix(target, "/bin/snap") || target == "snap" || strings.HasPrefix(target, "/snap/") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveWorkBaseDir chooses the base directory for per-session isolated workdirs.
+// When the target CLI runs inside Ubuntu Snap confinement, host /tmp is invisible to the Snap
+// process, so we automatically switch to a directory shared between host and Snap
+// ($SNAP_USER_COMMON/ar-sessions, $HOME/snap/<pkg>/common/ar-sessions, or non-hidden $HOME/agent-remote-sessions).
+func resolveWorkBaseDir(configuredBase, resolvedCmd, agent string) (string, error) {
+	if configuredBase != "" {
+		if err := os.MkdirAll(configuredBase, 0o700); err != nil {
+			return "", err
+		}
+		return configuredBase, nil
+	}
+
+	if runtime.GOOS != "linux" {
+		return "", nil
+	}
+
+	inSnapEnv := os.Getenv("SNAP") != "" || os.Getenv("SNAP_USER_COMMON") != ""
+	if !inSnapEnv && !isSnapBinary(resolvedCmd) {
+		return "", nil
+	}
+
+	if snapCommon := strings.TrimSpace(os.Getenv("SNAP_USER_COMMON")); snapCommon != "" {
+		dir := filepath.Join(snapCommon, "ar-sessions")
+		if err := os.MkdirAll(dir, 0o700); err == nil {
+			return dir, nil
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", nil
+	}
+
+	baseName := filepath.Base(resolvedCmd)
+	snapCandidates := make([]string, 0, 3)
+	if pkg, ok := knownSnapPackageByBinary[baseName]; ok {
+		snapCandidates = append(snapCandidates, pkg)
+	}
+	if agent == "antigravity" {
+		snapCandidates = append(snapCandidates, "antigravity-cli")
+	}
+	snapCandidates = append(snapCandidates, baseName)
+
+	for _, pkg := range snapCandidates {
+		commonDir := filepath.Join(home, "snap", pkg, "common")
+		if info, err := os.Stat(commonDir); err == nil && info.IsDir() {
+			dir := filepath.Join(commonDir, "ar-sessions")
+			if err := os.MkdirAll(dir, 0o700); err == nil {
+				return dir, nil
+			}
+		}
+	}
+
+	// Fallback: non-hidden directory inside $HOME (accessible via Snap `home` plug, unlike /tmp or ~/.cache)
+	dir := filepath.Join(home, "agent-remote-sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }

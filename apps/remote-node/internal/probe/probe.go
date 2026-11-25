@@ -27,6 +27,35 @@ var defaultAgents = []knownAgent{
 	{kind: "factory-droid", binary: "droid"},
 }
 
+// ResolveBinary locates a CLI binary via PATH and common fallback locations
+// (such as /snap/bin on Ubuntu and /opt/homebrew/bin on macOS when running under systemd/launchd).
+func ResolveBinary(bin string) (string, error) {
+	if p, err := exec.LookPath(bin); err == nil {
+		return p, nil
+	}
+	if strings.ContainsAny(bin, `/\`) {
+		return "", exec.ErrNotFound
+	}
+	candidates := []string{
+		"/snap/bin",
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "bin"),
+		)
+	}
+	for _, dir := range candidates {
+		full := filepath.Join(dir, bin)
+		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+			return full, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
 func RunHostProbe(ctx context.Context, activeSessions, maxSessions int) protocol.ProbeResPayload {
 	hostname, _ := os.Hostname()
 	agents := make([]protocol.AgentProbeItem, 0, len(defaultAgents))
@@ -36,7 +65,7 @@ func RunHostProbe(ctx context.Context, activeSessions, maxSessions int) protocol
 			Agent:  ka.kind,
 			Binary: ka.binary,
 		}
-		if p, err := exec.LookPath(ka.binary); err == nil {
+		if p, err := ResolveBinary(ka.binary); err == nil {
 			item.Installed = true
 			item.BinaryPath = p
 			item.Version = readVersion(ctx, p)
@@ -93,6 +122,9 @@ func DiscoverCatalog(ctx context.Context, req protocol.CatalogReqPayload) protoc
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
+	if resolved, err := ResolveBinary(bin); err == nil {
+		bin = resolved
+	}
 	cmd := exec.CommandContext(tctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	res.RawOutput = string(out)
