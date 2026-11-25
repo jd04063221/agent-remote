@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+release/
+*.tsbuildinfo
+
+# Go binaries & artifacts
+apps/remote-node/bin/
+*.exe
+*.out
+coverage.out
+
+# Runtime data & SQLite
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.agent-remote/
+
+# Env & secrets (never commit keys or tokens)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_deploy
+*_deploy.pub
+
+# Logs & temp
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
