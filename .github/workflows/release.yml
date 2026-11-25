@@ -106,9 +106,21 @@ jobs:
           pnpm run build
       - name: Stage self-contained desktop app
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           mkdir -p desktop-stage/web desktop-stage/builder
           pnpm --filter @agent-remote/desktop deploy --legacy --prod desktop-stage/desktop
+          node -e '
+            const fs = require("node:fs");
+            const p = "desktop-stage/desktop/package.json";
+            const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+            pkg.name = "agent-remote-desktop";
+            pkg.desktopName = "agent-remote.desktop";
+            const ver = (process.env.RELEASE_TAG || "").replace(/^v/, "");
+            if (/^\d+\.\d+\.\d+/.test(ver)) pkg.version = ver;
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
+          '
           cp -r apps/web/dist desktop-stage/web/dist
           cp apps/desktop/electron-builder.yml desktop-stage/desktop/electron-builder.yml
       - name: Install Electron & electron-builder and package installer
@@ -119,7 +131,7 @@ jobs:
           npm install --no-audit --no-fund electron@latest electron-builder@latest
           ELECTRON_VER=$(node -p "require('./node_modules/electron/package.json').version")
           cd ../desktop
-          ../builder/node_modules/.bin/electron-builder --config electron-builder.yml ${{ matrix.eb_flag }} -c.electronVersion="$ELECTRON_VER"
+          ../builder/node_modules/.bin/electron-builder --config electron-builder.yml ${{ matrix.eb_flag }} --publish never -c.electronVersion="$ELECTRON_VER"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
