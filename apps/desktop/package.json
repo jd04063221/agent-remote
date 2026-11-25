@@ -17,7 +17,8 @@
     "clean": "rm -rf dist release"
   },
   "dependencies": {
-    "@agent-remote/hub-server": "workspace:*"
+    "@agent-remote/hub-server": "workspace:*",
+    "agent-remote": "workspace:*"
   },
   "peerDependencies": {
     "electron": ">=35.0.0"

@@ -1,6 +1,7 @@
 appId: io.github.jd04063221.agent-remote
 productName: Agent Remote
 executableName: agent-remote
+asar: false
 directories:
   output: release
 files:
@@ -10,6 +11,8 @@ files:
 extraResources:
   - from: ../web/dist
     to: web
+  - from: cli-bin
+    to: bin
 mac:
   category: public.app-category.developer-tools
   artifactName: "agent-remote-${version}-macos-${arch}.${ext}"
@@ -45,9 +48,12 @@ linux:
         - arm64
 deb:
   packageName: agent-remote-desktop
+  afterInstall: packaging/deb-after-install.sh
+  afterRemove: packaging/deb-after-remove.sh
 nsis:
   artifactName: "agent-remote-${version}-windows-${arch}-setup.${ext}"
   oneClick: false
   allowToChangeInstallationDirectory: true
+  include: packaging/installer.nsh
 portable:
   artifactName: "agent-remote-${version}-windows-${arch}-portable.${ext}"

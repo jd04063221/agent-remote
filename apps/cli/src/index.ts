@@ -34,6 +34,20 @@ import { runInteractiveChat } from "./chat.js";
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "help";
 
+function getCliVersion(): string {
+  if (process.env.AGENT_REMOTE_VERSION?.trim()) {
+    return process.env.AGENT_REMOTE_VERSION.trim();
+  }
+  try {
+    const pkgPath = path.resolve(import.meta.dirname, "../package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version?: string };
+    if (pkg.version) return pkg.version;
+  } catch {
+    // fallback below
+  }
+  return "0.1.2";
+}
+
 function getFlag(name: string, fallback?: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx !== -1 && args[idx + 1]) return args[idx + 1];
@@ -162,10 +176,12 @@ async function main(): Promise<void> {
       const host = getFlag("--host", "127.0.0.1")!;
       const dbPath = getDefaultDbPath(getFlag("--db") ?? cfg.hub.db_path);
       const webCandidates = [
+        ...(process.env.AGENT_REMOTE_WEB_DIST ? [process.env.AGENT_REMOTE_WEB_DIST] : []),
         path.resolve(import.meta.dirname, "../web/dist"),
+        path.resolve(import.meta.dirname, "../../web"),
         path.resolve(import.meta.dirname, "../../web/dist"),
       ];
-      const webDistDir = webCandidates.find((p) => fs.existsSync(p)) ?? webCandidates[1]!;
+      const webDistDir = webCandidates.find((p) => fs.existsSync(p)) ?? webCandidates[webCandidates.length - 1]!;
 
       const hub = new AgentRemoteHub({ dbPath, webDistDir });
       const info = await hub.listen(port, host);
@@ -556,8 +572,15 @@ echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
       process.exit(1);
     }
 
+    case "--version":
+    case "-v":
+    case "version": {
+      console.log(`agent-remote (ar) v${getCliVersion()}`);
+      break;
+    }
+
     default:
-      console.log(`agent-remote (ar) v0.1.0
+      console.log(`agent-remote (ar) v${getCliVersion()}
 
 Commands:
   ar init [--path <toml>] [--force]            Create starter ~/.config/agent-remote/config.toml

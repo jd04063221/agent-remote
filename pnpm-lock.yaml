@@ -44,6 +44,9 @@ importers:
       '@agent-remote/hub-server':
         specifier: workspace:*
         version: link:../hub-server
+      agent-remote:
+        specifier: workspace:*
+        version: link:../cli
       electron:
         specifier: '>=35.0.0'
         version: 45.5.0

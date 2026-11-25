@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+set -e
+
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(CDPATH='' cd -P -- "$(dirname -- "$SOURCE")" && pwd)"
+  TARGET="$(readlink -- "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+BIN_DIR="$(CDPATH='' cd -P -- "$(dirname -- "$SOURCE")" && pwd)"
+RES_DIR="$(CDPATH='' cd -P -- "$BIN_DIR/.." && pwd)"
+CLI_ENTRY="$RES_DIR/app/dist/cli-entry.js"
+
+export ELECTRON_RUN_AS_NODE=1
+export NODE_NO_WARNINGS=1
+
+# macOS .app bundle
+if [ -x "$RES_DIR/../MacOS/Agent Remote" ]; then
+  exec "$RES_DIR/../MacOS/Agent Remote" "$CLI_ENTRY" "$@"
+fi
+if [ -x "$RES_DIR/../MacOS/agent-remote" ]; then
+  exec "$RES_DIR/../MacOS/agent-remote" "$CLI_ENTRY" "$@"
+fi
+
+# Linux packaged app
+if [ -x "$RES_DIR/../agent-remote" ]; then
+  exec "$RES_DIR/../agent-remote" "$CLI_ENTRY" "$@"
+fi
+
+# Windows Git Bash / MSYS2
+if [ -f "$RES_DIR/../Agent Remote.exe" ] || [ -f "$RES_DIR/../agent-remote.exe" ]; then
+  WIN_CLI_ENTRY="$CLI_ENTRY"
+  if command -v cygpath >/dev/null 2>&1; then
+    WIN_CLI_ENTRY="$(cygpath -w "$CLI_ENTRY")"
+  fi
+  if [ -f "$RES_DIR/../Agent Remote.exe" ]; then
+    exec "$RES_DIR/../Agent Remote.exe" "$WIN_CLI_ENTRY" "$@"
+  fi
+  exec "$RES_DIR/../agent-remote.exe" "$WIN_CLI_ENTRY" "$@"
+fi
+
+echo "agent-remote desktop executable not found relative to $RES_DIR" >&2
+exit 1

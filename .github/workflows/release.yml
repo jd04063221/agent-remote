@@ -53,9 +53,19 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
       - name: Stage portable CLI + Web bundle
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           mkdir -p release-bundle
           pnpm --filter agent-remote deploy --legacy --prod release-bundle/agent-remote
+          node -e '
+            const fs = require("node:fs");
+            const p = "release-bundle/agent-remote/package.json";
+            const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+            const ver = (process.env.RELEASE_TAG || "").replace(/^v/, "");
+            if (/^\d+\.\d+\.\d+/.test(ver)) pkg.version = ver;
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
+          '
           mkdir -p release-bundle/agent-remote/web
           cp -r apps/web/dist release-bundle/agent-remote/web/dist
           tar -czf agent-remote-cli-web.tar.gz -C release-bundle agent-remote
@@ -122,6 +132,9 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
           '
           cp -r apps/web/dist desktop-stage/web/dist
+          cp -r apps/desktop/cli-bin desktop-stage/desktop/cli-bin
+          cp -r apps/desktop/packaging desktop-stage/desktop/packaging
+          chmod +x desktop-stage/desktop/cli-bin/ar desktop-stage/desktop/cli-bin/agent-remote desktop-stage/desktop/packaging/*.sh
           cp apps/desktop/electron-builder.yml desktop-stage/desktop/electron-builder.yml
       - name: Install Electron & electron-builder and package installer
         shell: bash
@@ -132,6 +145,30 @@ jobs:
           ELECTRON_VER=$(node -p "require('./node_modules/electron/package.json').version")
           cd ../desktop
           ../builder/node_modules/.bin/electron-builder --config electron-builder.yml ${{ matrix.eb_flag }} --publish never -c.electronVersion="$ELECTRON_VER"
+      - name: Smoke test bundled ar / agent-remote CLI
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            OUT="$(cmd.exe //c 'desktop-stage\desktop\release\win-unpacked\resources\bin\ar.cmd --version' | tr -d '\r')"
+            echo "Windows ar.cmd: $OUT"
+            echo "$OUT" | grep -q "agent-remote (ar)"
+            HELP_OUT="$(cmd.exe //c 'desktop-stage\desktop\release\win-unpacked\resources\bin\agent-remote.cmd help' | tr -d '\r')"
+            echo "$HELP_OUT" | head -n 5
+            echo "$HELP_OUT" | grep -q "ar doctor"
+            BASH_OUT="$("desktop-stage/desktop/release/win-unpacked/resources/bin/ar" --version | tr -d '\r')"
+            echo "Windows Git Bash ar: $BASH_OUT"
+            echo "$BASH_OUT" | grep -q "agent-remote (ar)"
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            OUT="$("desktop-stage/desktop/release/mac-arm64/Agent Remote.app/Contents/Resources/bin/ar" --version)"
+            echo "macOS ar: $OUT"
+            echo "$OUT" | grep -q "agent-remote (ar)"
+            "desktop-stage/desktop/release/mac-arm64/Agent Remote.app/Contents/Resources/bin/agent-remote" help | head -n 5
+          else
+            OUT="$("desktop-stage/desktop/release/linux-unpacked/resources/bin/ar" --version)"
+            echo "Linux ar: $OUT"
+            echo "$OUT" | grep -q "agent-remote (ar)"
+            "desktop-stage/desktop/release/linux-unpacked/resources/bin/agent-remote" help | head -n 5
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
