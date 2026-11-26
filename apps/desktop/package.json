@@ -1,6 +1,6 @@
 {
   "name": "@agent-remote/desktop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "agent-remote multi-agent remote-brain / local-execution desktop workbench",
   "author": "agent-remote <noreply@users.noreply.github.com>",
   "homepage": "https://github.com/jd04063221/agent-remote",

@@ -129,7 +129,7 @@ function resolveHubAppVersion(): string {
       // try next candidate
     }
   }
-  return "0.1.3";
+  return "0.1.4";
 }
 
 export class AgentRemoteHub {

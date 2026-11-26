@@ -4,6 +4,29 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.1.4] - 2026-11-26
+
+### 新增（Added）
+- **Web / 桌面端完整 GFM Markdown 渲染**：新增零依赖、XSS 安全的纯 React Markdown 解析与渲染组件（`MarkdownContent`），专门兼容中文标点加粗（如 `类似**应该加重**这类`、`**“重要”**：`）与流式未闭合输出，支持标题、粗体/斜体/删除线、围栏代码块与一键复制、表格（含反引号内 `|` 联合类型与横向滚动）、任务列表与引用提示框，全面覆盖主模型回复、思考过程、子代理实时流与分屏对比面板。
+- **6 档完整权限体系（新增“工作区完全权限”与“完全权限·无沙盒”）**：
+  - `workspace-full`（**工作区完全权限**）：严格限定在当前工作区沙盒内（保护 `.git/hooks`），工作区内读写、删除、任意脚本/构建/测试命令及本地 MCP 全部免审批自动放行；
+  - `full-access`（**完全权限·无沙盒**）：解除工作区目录沙盒限制，放行全机路径读写与全部命令（含 `sudo`）及本地 MCP（仅保留 `rm -rf /`、`mkfs`、`format`、fork bomb 极端毁灭操作兜底）；
+  - 支持会话中途动态切换沙盒边界，非只读子代理（如 `implementer`）同步继承对应高权限档位。
+- **Web / 桌面端版本号常驻显示**：在左侧栏 `agent-remote` 品牌下方及浏览器标签/桌面窗口标题实时展示当前版本号（自动从 Electron `app.getVersion()`、CLI 或 Hub 读取）。
+- **自动化版本对比发布说明**：新增 `scripts/extract-release-notes.mjs` 并接入 Release 工作流，每次打 tag 自动在 GitHub Release 页面生成相对上一版本的中文改进说明、提交明细与完整代码对比链接。
+
+### 变更（Changed）
+- **Windows 便携版改为 `.zip` 压缩包**：将 Windows 便携版产物由单文件便携 `.exe` 改为 `agent-remote-0.1.4-windows-x64-portable.zip`（免启动二次解压、减少杀软误报，解压后可直接调用内置 `resources/bin/ar.cmd`）；NSIS 安装包仍为 `agent-remote-0.1.4-windows-x64-setup.exe`。
+- **全端统一 6 档权限顺序与命名**：Web / 桌面端、`ar chat`、`ar exec`、`ar acp`、`config.toml` 与文档统一按权限由低到高排列：`plan` → `default` → `accept-edits` → `auto`（更名为“工作区安全自动”）→ `workspace-full` → `full-access`；`ar acp`（Zed / JetBrains）同步暴露 6 档模式列表并支持 `session/set_mode` 动态切换。
+
+### 修复（Fixed）
+- **修复长任务 / 长脚本超过 10 分钟触发 `ACP request "session/prompt" timed out after 600000ms` 报错，并打通全链路 5 处超时限制**：
+  - 移除 ACP `session/prompt` 与 Codex `turn/start` 的 600s 墙钟上限（远端进程退出或点击“停止/强制停止”仍立即终止）；
+  - Go 远端节点 MCP 桥接单次工具调用超时从 `10m` 放宽至 `2h`；
+  - 本地 HTTP MCP Server 显式关闭 Node.js 默认 5 分钟 `requestTimeout`，消除本地 `opencode` / SSH 长工具调用 5 分钟被强断的隐患；
+  - `run_command` 改为默认 5 分钟无输出空闲超时（只要脚本持续打印日志即自动续期，单次硬上限提升至 60 分钟；卡死无输出仍按时中止）；本地 MCP 联邦工具调用超时从 60s 提至 10 分钟。
+- **修复 `v0.1.3` 下调用 MCP 或执行脚本仍弹窗要求手动确认的问题**：`workspace-full` 与 `full-access` 直接放行脚本、删除与全部 MCP 工具并跳过 `config.toml` 中的 `ask` 规则（仍保留显式 `deny` 规则）；ACP `session/request_permission` 补充识别 `toolCall.kind === "mcp"` 与 `local_mcp__`。
+
 ## [0.1.3] - 2026-11-25
 
 ### 新增（Added）
@@ -62,6 +85,7 @@
 - **多形态前端与共享 SQLite 历史**：提供 Web / Electron 三栏工作台（含分屏对比、审批卡片、Subagent 蓝图编辑）、交互式终端 `ar chat` / `ar threads`、标准 ACP 桥接 `ar acp`、无头执行 `ar exec` 与 `--ephemeral` 远端无痕模式。
 - **零安装 SSH 兜底与配置管理**：支持 SSH / Tailscale SSH 免装节点接入、TOML 配置文件初始化（`ar init`）以及 GitHub Actions CI 与多平台 Release 自动发版流水线。
 
+[0.1.4]: https://github.com/jd04063221/agent-remote/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jd04063221/agent-remote/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jd04063221/agent-remote/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jd04063221/agent-remote/compare/e3f2da6...v0.1.1
