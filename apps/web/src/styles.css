@@ -45,7 +45,14 @@ html, body, #root {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
-.brand-title { display: flex; align-items: center; gap: 6px; font-size: 13.5px; white-space: nowrap; }
+.brand-title { display: flex; align-items: center; gap: 6px; font-size: 13.5px; white-space: nowrap; min-width: 0; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+.version-badge {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 .brand-actions { display: flex; align-items: center; gap: 6px; }
 .lang-select {
   padding: 3px 5px;

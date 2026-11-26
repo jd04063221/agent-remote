@@ -183,6 +183,9 @@ async function main(): Promise<void> {
       ];
       const webDistDir = webCandidates.find((p) => fs.existsSync(p)) ?? webCandidates[webCandidates.length - 1]!;
 
+      if (!process.env.AGENT_REMOTE_VERSION) {
+        process.env.AGENT_REMOTE_VERSION = getCliVersion();
+      }
       const hub = new AgentRemoteHub({ dbPath, webDistDir });
       const info = await hub.listen(port, host);
       console.log(`agent-remote Hub running at ${info.url}`);

@@ -162,6 +162,7 @@ export interface QuotaSnapshot {
 
 export interface HubStateSnapshot {
   localEnv?: {
+    version?: string;
     defaultWorkspaceRoot: string;
     platform: string;
     arch: string;

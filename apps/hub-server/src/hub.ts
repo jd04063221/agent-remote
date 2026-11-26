@@ -112,10 +112,31 @@ export interface HubServerOptions {
   configPath?: string;
 }
 
+function resolveHubAppVersion(): string {
+  const fromEnv = process.env.AGENT_REMOTE_VERSION?.trim();
+  if (fromEnv) return fromEnv.replace(/^v/i, "");
+  const candidates = [
+    path.resolve(import.meta.dirname, "../../cli/package.json"),
+    path.resolve(import.meta.dirname, "../../desktop/package.json"),
+    path.resolve(import.meta.dirname, "../package.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const pkg = JSON.parse(fs.readFileSync(p, "utf8")) as { version?: string };
+      if (pkg.version?.trim()) return pkg.version.trim().replace(/^v/i, "");
+    } catch {
+      // try next candidate
+    }
+  }
+  return "0.1.3";
+}
+
 export class AgentRemoteHub {
   readonly store: HubStore;
   readonly config: AgentRemoteConfig;
   private readonly webDistDir?: string;
+  private readonly appVersion: string;
 
   private readonly clients = new Map<string, TailnetDirectClient>();
   private readonly probeCache = new Map<string, NodeProbeResult>();
@@ -134,6 +155,7 @@ export class AgentRemoteHub {
   constructor(options: { dbPath: string; webDistDir?: string; configPath?: string }) {
     this.store = new HubStore(options.dbPath);
     this.webDistDir = options.webDistDir;
+    this.appVersion = resolveHubAppVersion();
     this.config = loadAgentRemoteConfig({ globalPath: options.configPath });
     this.hydrateFromConfig(this.config);
   }
@@ -274,6 +296,7 @@ export class AgentRemoteHub {
 
     return {
       localEnv: {
+        version: this.appVersion,
         defaultWorkspaceRoot: process.cwd(),
         platform: process.platform,
         arch: process.arch,

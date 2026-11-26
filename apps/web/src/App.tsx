@@ -56,12 +56,6 @@ export function App() {
     [locale],
   );
 
-  useEffect(() => {
-    saveLocale(locale);
-    document.documentElement.lang = locale;
-    document.title = translate(locale, "app.title");
-  }, [locale]);
-
   const [state, setState] = useState<HubStateSnapshot>({
     hosts: [],
     profiles: [],
@@ -70,6 +64,24 @@ export function App() {
     threads: [],
     pendingApprovals: [],
   });
+
+  const appVersion = useMemo(() => {
+    const raw =
+      state.localEnv?.version ||
+      (window as unknown as { agentRemoteDesktop?: { version?: string } }).agentRemoteDesktop
+        ?.version ||
+      "";
+    return raw.trim().replace(/^v/i, "");
+  }, [state.localEnv?.version]);
+
+  useEffect(() => {
+    saveLocale(locale);
+    document.documentElement.lang = locale;
+    const baseTitle = translate(locale, "app.title");
+    document.title = appVersion
+      ? baseTitle.replace("agent-remote", `agent-remote v${appVersion}`)
+      : baseTitle;
+  }, [locale, appVersion]);
   const [wsConnected, setWsConnected] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [eventsByThread, setEventsByThread] = useState<Record<string, ThreadEvent[]>>({});
@@ -758,7 +770,14 @@ export function App() {
         <div className="brand-bar">
           <div className="brand-title">
             <span className={`dot ${wsConnected ? "ok" : "err"}`} />
-            <strong>agent-remote</strong>
+            <div className="brand-text">
+              <strong>agent-remote</strong>
+              {appVersion && (
+                <span className="version-badge" title={`agent-remote v${appVersion}`}>
+                  v{appVersion}
+                </span>
+              )}
+            </div>
           </div>
           <div className="brand-actions">
             <select

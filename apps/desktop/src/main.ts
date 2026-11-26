@@ -16,6 +16,9 @@ function resolveWebDistDir(): string {
 }
 
 async function createWindow(): Promise<void> {
+  if (!process.env.AGENT_REMOTE_VERSION && app.getVersion()) {
+    process.env.AGENT_REMOTE_VERSION = app.getVersion();
+  }
   const dbPath =
     process.env.AGENT_REMOTE_DB ??
     path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
@@ -25,12 +28,13 @@ async function createWindow(): Promise<void> {
   hub = new AgentRemoteHub({ dbPath, webDistDir });
   const started = await hub.listen(port, "127.0.0.1");
 
+  const ver = process.env.AGENT_REMOTE_VERSION || app.getVersion();
   mainWindow = new BrowserWindow({
     width: 1460,
     height: 920,
     minWidth: 1080,
     minHeight: 680,
-    title: "agent-remote — Multi-Agent Control Workbench",
+    title: ver ? `agent-remote v${ver} — Multi-Agent Control Workbench` : "agent-remote — Multi-Agent Control Workbench",
     backgroundColor: "#0c0f14",
     webPreferences: {
       preload: path.resolve(import.meta.dirname, "./preload.js"),
