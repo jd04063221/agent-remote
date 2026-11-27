@@ -45,6 +45,9 @@ import {
   type StdioMcpClient,
 } from "@agent-remote/tool-plane";
 import {
+  deriveEd25519PublicKey,
+  generateApiKey,
+  generateEd25519Keypair,
   LocalProcessChannel,
   normalizeTailnetEndpoint,
   SshSessionChannel,
@@ -165,6 +168,24 @@ export class AgentRemoteHub {
   private hydrateFromConfig(cfg: AgentRemoteConfig): void {
     for (const [id, h] of Object.entries(cfg.hosts)) {
       if (!this.store.getHost(id)) {
+        let privateKeyPem = h.private_key_pem?.trim() || undefined;
+        let publicKey = h.public_key?.trim() || undefined;
+        if (!privateKeyPem && h.private_key_path?.trim()) {
+          try {
+            privateKeyPem = fs.readFileSync(h.private_key_path.trim(), "utf8");
+          } catch {
+            // ignore missing key file on startup
+          }
+        }
+        if (privateKeyPem) {
+          try {
+            const derived = deriveEd25519PublicKey(privateKeyPem, h.name ?? id);
+            privateKeyPem = derived.privateKeyPem;
+            publicKey = publicKey || derived.publicKey;
+          } catch {
+            // keep raw config value if unparseable
+          }
+        }
         this.store.upsertHost({
           id,
           name: h.name ?? id,
@@ -173,6 +194,8 @@ export class AgentRemoteHub {
             h.transport === "tailnet-direct" ? normalizeTailnetEndpoint(h.endpoint) : h.endpoint,
           authMode: h.auth,
           bearerToken: h.bearer_token,
+          privateKeyPem,
+          publicKey,
           sshTarget: h.ssh_target,
           maxSessions: h.max_concurrent_sessions,
         });
@@ -371,6 +394,9 @@ export class AgentRemoteHub {
         ...h,
         bearerToken: h.bearerToken ? "***" : undefined,
         hasBearerToken: Boolean(h.bearerToken),
+        privateKeyPem: undefined,
+        hasPrivateKey: Boolean(h.privateKeyPem),
+        publicKey: h.publicKey,
         connected: h.transport === "local" ? true : (client?.isConnected() ?? false),
         rttMs: status?.rttMs,
         peerUser: status?.node?.peerUser,
@@ -439,6 +465,7 @@ export class AgentRemoteHub {
         hostId: host.id,
         endpoint: normalizedEndpoint,
         bearerToken: host.authMode === "dev-token" ? host.bearerToken : undefined,
+        privateKeyPem: host.authMode === "pubkey" ? host.privateKeyPem : undefined,
       });
       client.on("connected", () => {
         this.hostErrors.delete(hostId);
@@ -1824,6 +1851,25 @@ export class AgentRemoteHub {
         return sendJson(res, 200, this.getFullState());
       }
 
+      if (pathname === "/api/auth/keygen" && req.method === "POST") {
+        const body = (await readJsonBody(req)) as {
+          type?: "ed25519" | "token";
+          comment?: string;
+          importPrivateKey?: string;
+        };
+        if (body.type === "token") {
+          return sendJson(res, 200, { ok: true, token: generateApiKey() });
+        }
+        try {
+          const kp = body.importPrivateKey?.trim()
+            ? deriveEd25519PublicKey(body.importPrivateKey, body.comment)
+            : generateEd25519Keypair(body.comment);
+          return sendJson(res, 200, { ok: true, ...kp });
+        } catch (err) {
+          return sendJson(res, 400, { error: (err as Error).message });
+        }
+      }
+
       if (pathname === "/api/hosts" && req.method === "POST") {
         const body = (await readJsonBody(req)) as HostRecord;
         const id = body.id?.trim();
@@ -1843,6 +1889,27 @@ export class AgentRemoteHub {
           bearerToken =
             !incomingToken || incomingToken === "***" ? existing?.bearerToken : incomingToken;
         }
+        let privateKeyPem: string | undefined;
+        let publicKey: string | undefined;
+        if (authMode === "pubkey") {
+          const incomingPriv = body.privateKeyPem?.trim();
+          if (incomingPriv && incomingPriv !== "***") {
+            try {
+              const derived = deriveEd25519PublicKey(incomingPriv, body.name?.trim() || id);
+              privateKeyPem = derived.privateKeyPem;
+              publicKey = derived.publicKey;
+            } catch (err) {
+              return sendJson(res, 400, { error: `Invalid Ed25519 private key: ${(err as Error).message}` });
+            }
+          } else if (existing?.privateKeyPem) {
+            privateKeyPem = existing.privateKeyPem;
+            publicKey = existing.publicKey;
+          } else {
+            return sendJson(res, 400, {
+              error: "Ed25519 private key is required for pubkey auth (generate a keypair or paste an existing private key)",
+            });
+          }
+        }
         const normalizedHost: HostRecord = {
           id,
           name: body.name?.trim() || id,
@@ -1850,6 +1917,8 @@ export class AgentRemoteHub {
           endpoint,
           authMode,
           bearerToken,
+          privateKeyPem,
+          publicKey,
           sshTarget: body.sshTarget?.trim() || undefined,
           maxSessions: Number(body.maxSessions) > 0 ? Number(body.maxSessions) : 8,
         };
@@ -1866,6 +1935,8 @@ export class AgentRemoteHub {
           host: {
             ...normalizedHost,
             bearerToken: normalizedHost.bearerToken ? "***" : undefined,
+            privateKeyPem: undefined,
+            hasPrivateKey: Boolean(normalizedHost.privateKeyPem),
           },
           state,
         });

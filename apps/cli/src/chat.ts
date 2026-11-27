@@ -121,6 +121,7 @@ function collapseEventsToTurns(
 export interface InteractiveChatOptions {
   endpoint: string;
   bearerToken?: string;
+  privateKeyPem?: string;
   hostId?: string;
   profileId?: string;
   agent: AgentKind;
@@ -175,8 +176,13 @@ export async function runInteractiveChat(options: InteractiveChatOptions): Promi
           name: hostId,
           transport: "tailnet-direct",
           endpoint: options.endpoint,
-          authMode: options.bearerToken ? "dev-token" : "tailscale-serve",
+          authMode: options.privateKeyPem
+            ? "pubkey"
+            : options.bearerToken
+              ? "dev-token"
+              : "tailscale-serve",
           bearerToken: options.bearerToken,
+          privateKeyPem: options.privateKeyPem,
           maxSessions: 8,
         });
       }
@@ -228,6 +234,7 @@ export async function runInteractiveChat(options: InteractiveChatOptions): Promi
     hostId,
     endpoint: options.endpoint,
     bearerToken: options.bearerToken,
+    privateKeyPem: options.privateKeyPem,
   });
 
   console.log(`${ANSI.cyan}Connecting to ${options.endpoint}...${ANSI.reset}`);

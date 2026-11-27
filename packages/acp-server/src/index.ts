@@ -87,6 +87,7 @@ export const ACP_PERMISSION_MODES: ReadonlyArray<{
 export interface AcpStdioBridgeOptions {
   endpoint: string;
   bearerToken?: string;
+  privateKeyPem?: string;
   agent: AgentKind;
   remoteBin?: string;
   defaultModel?: string;
@@ -105,6 +106,7 @@ export async function runAcpStdioBridge(options: AcpStdioBridgeOptions): Promise
     hostId: "acp-remote",
     endpoint: options.endpoint,
     bearerToken: options.bearerToken,
+    privateKeyPem: options.privateKeyPem,
   });
   await client.connect();
 

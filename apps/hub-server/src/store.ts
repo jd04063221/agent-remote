@@ -22,8 +22,10 @@ export interface HostRecord {
   name: string;
   transport: TransportMode | "local";
   endpoint: string;
-  authMode: "tailscale-serve" | "tailscaled-whois" | "dev-token" | "none";
+  authMode: "tailscale-serve" | "tailscaled-whois" | "pubkey" | "dev-token" | "none";
   bearerToken?: string;
+  privateKeyPem?: string;
+  publicKey?: string;
   sshTarget?: string;
   maxSessions: number;
 }
@@ -125,6 +127,8 @@ export class HubStore {
         endpoint TEXT NOT NULL,
         auth_mode TEXT NOT NULL,
         bearer_token TEXT,
+        private_key_pem TEXT,
+        public_key TEXT,
         ssh_target TEXT,
         max_sessions INTEGER NOT NULL DEFAULT 8
       );
@@ -192,6 +196,15 @@ export class HubStore {
     `);
 
     // Forward-compatible column migrations for existing ~/.config/agent-remote/hub.sqlite files
+    const hostCols = this.db.prepare("PRAGMA table_info(hosts)").all() as Array<{ name: string }>;
+    const hostColSet = new Set(hostCols.map((c) => c.name));
+    if (!hostColSet.has("private_key_pem")) {
+      this.db.exec("ALTER TABLE hosts ADD COLUMN private_key_pem TEXT");
+    }
+    if (!hostColSet.has("public_key")) {
+      this.db.exec("ALTER TABLE hosts ADD COLUMN public_key TEXT");
+    }
+
     const cols = this.db.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>;
     const colSet = new Set(cols.map((c) => c.name));
     if (!colSet.has("remote_session_id")) {
@@ -244,6 +257,8 @@ export class HubStore {
       endpoint: String(r.endpoint),
       authMode: String(r.auth_mode) as HostRecord["authMode"],
       bearerToken: r.bearer_token ? String(r.bearer_token) : undefined,
+      privateKeyPem: r.private_key_pem ? String(r.private_key_pem) : undefined,
+      publicKey: r.public_key ? String(r.public_key) : undefined,
       sshTarget: r.ssh_target ? String(r.ssh_target) : undefined,
       maxSessions: Number(r.max_sessions),
     }));
@@ -256,11 +271,12 @@ export class HubStore {
   upsertHost(host: HostRecord): void {
     this.db
       .prepare(
-        `INSERT INTO hosts (id, name, transport, endpoint, auth_mode, bearer_token, ssh_target, max_sessions)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO hosts (id, name, transport, endpoint, auth_mode, bearer_token, private_key_pem, public_key, ssh_target, max_sessions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name=excluded.name, transport=excluded.transport, endpoint=excluded.endpoint,
            auth_mode=excluded.auth_mode, bearer_token=excluded.bearer_token,
+           private_key_pem=excluded.private_key_pem, public_key=excluded.public_key,
            ssh_target=excluded.ssh_target, max_sessions=excluded.max_sessions`,
       )
       .run(
@@ -270,6 +286,8 @@ export class HubStore {
         host.endpoint,
         host.authMode,
         host.bearerToken ?? null,
+        host.privateKeyPem ?? null,
+        host.publicKey ?? null,
         host.sshTarget ?? null,
         host.maxSessions,
       );

@@ -108,6 +108,8 @@ async function main(): Promise<void> {
       let profileKey = getFlag("--profile") ?? cfg.hub.default_profile;
       let endpoint = getFlag("--endpoint");
       let bearerToken = getFlag("--token");
+      const keyFileFlag = getFlag("--key-file");
+      let privateKeyPem = keyFileFlag ? fs.readFileSync(keyFileFlag, "utf8") : undefined;
       let agent = getFlag("--agent") as AgentKind | undefined;
       let remoteBin = getFlag("--remote-bin");
       let model = getFlag("--model");
@@ -128,6 +130,7 @@ async function main(): Promise<void> {
           const storedHost = peekStore.getHost(existing.hostId);
           endpoint = endpoint ?? storedHost?.endpoint;
           bearerToken = bearerToken ?? storedHost?.bearerToken;
+          privateKeyPem = privateKeyPem ?? storedHost?.privateKeyPem;
           agent = agent ?? storedProf?.agent;
           remoteBin = remoteBin ?? storedProf?.remoteBin;
           model = model ?? existing.model ?? storedProf?.defaultModel;
@@ -141,17 +144,25 @@ async function main(): Promise<void> {
       const prof = profileKey ? cfg.profiles[profileKey] : undefined;
       const host = prof ? cfg.hosts[prof.host] : hostId ? cfg.hosts[hostId] : undefined;
       endpoint = endpoint ?? host?.endpoint;
+      if (!privateKeyPem) {
+        privateKeyPem =
+          host?.private_key_pem ??
+          (host?.private_key_path ? fs.readFileSync(host.private_key_path, "utf8") : undefined) ??
+          process.env.AGENT_REMOTE_PRIVATE_KEY;
+      }
 
       if (!endpoint) {
         console.error(
-          "Usage: ar chat [--resume <threadId>] [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--agent antigravity] [--ephemeral]",
+          "Usage: ar chat [--resume <threadId>] [--profile <id> | --endpoint wss://<node>.ts.net/v1/ws] [--key-file <ed25519-privkey>] [--token <api-key>] [--agent antigravity] [--ephemeral]",
         );
         process.exit(1);
       }
 
       await runInteractiveChat({
         endpoint,
-        bearerToken: bearerToken ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
+        bearerToken:
+          bearerToken ?? host?.bearer_token ?? process.env.AGENT_REMOTE_TOKEN ?? process.env.AGENT_REMOTE_DEV_TOKEN,
+        privateKeyPem,
         hostId: hostId ?? prof?.host,
         profileId: profileKey,
         agent: agent ?? prof?.agent ?? "antigravity",
@@ -214,9 +225,20 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       const agent = (getFlag("--agent") as AgentKind | undefined) ?? prof?.agent ?? "antigravity";
+      const acpKeyFile = getFlag("--key-file");
+      const acpPrivateKeyPem =
+        (acpKeyFile ? fs.readFileSync(acpKeyFile, "utf8") : undefined) ??
+        host?.private_key_pem ??
+        (host?.private_key_path ? fs.readFileSync(host.private_key_path, "utf8") : undefined) ??
+        process.env.AGENT_REMOTE_PRIVATE_KEY;
       await runAcpStdioBridge({
         endpoint,
-        bearerToken: getFlag("--token") ?? host?.bearer_token ?? process.env.AGENT_REMOTE_DEV_TOKEN,
+        bearerToken:
+          getFlag("--token") ??
+          host?.bearer_token ??
+          process.env.AGENT_REMOTE_TOKEN ??
+          process.env.AGENT_REMOTE_DEV_TOKEN,
+        privateKeyPem: acpPrivateKeyPem,
         agent,
         remoteBin: getFlag("--remote-bin") ?? prof?.remote_bin,
         defaultModel: getFlag("--model") ?? prof?.default_model,
@@ -482,6 +504,10 @@ async function main(): Promise<void> {
       if (sub === "deploy-script") {
         const port = getFlag("--port", "19420")!;
         const auth = getFlag("--auth", "tailscale-serve")!;
+        const listenHost = getFlag(
+          "--listen-host",
+          auth === "pubkey" || auth === "token" || auth === "dev-token" ? "0.0.0.0" : "127.0.0.1",
+        )!;
         const targetOs = getFlag("--os", "linux")!;
         const runUser = getFlag("--user");
         const allowedUsers = getFlag("--allowed-users");
@@ -503,7 +529,7 @@ async function main(): Promise<void> {
 set -euo pipefail
 # Run on your remote macOS host (as the logged-in user who authenticated agy/claude/codex)
 # after copying agent-remote-node-darwin-* to /usr/local/bin/agent-remote-node
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/agent-remote"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/agent-remote" "$HOME/.config/agent-remote"
 cat <<EOF > "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -515,7 +541,7 @@ cat <<EOF > "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
   <array>
     <string>/usr/local/bin/agent-remote-node</string>
     <string>--listen</string>
-    <string>127.0.0.1:${port}</string>
+    <string>${listenHost}:${port}</string>
     <string>--auth-mode</string>
     <string>${auth}</string>
 ${xmlExtraArgs ? xmlExtraArgs + "\n" : ""}  </array>
@@ -537,8 +563,8 @@ ${xmlExtraArgs ? xmlExtraArgs + "\n" : ""}  </array>
 EOF
 launchctl unload "$HOME/Library/LaunchAgents/io.agent-remote.node.plist" 2>/dev/null || true
 launchctl load -w "$HOME/Library/LaunchAgents/io.agent-remote.node.plist"
-${auth === "tailscale-serve" ? `tailscale serve --bg http://127.0.0.1:${port}` : "# Listening without tailscale serve"}
-echo "Done! Connect via wss://<your-mac>.<your-tailnet>.ts.net/v1/ws"
+${auth === "tailscale-serve" ? `tailscale serve --bg http://127.0.0.1:${port}` : auth === "pubkey" ? `# Append client public keys (one per line) to ~/.config/agent-remote/authorized_keys (hot-reloaded automatically)` : `# Listening with --auth-mode ${auth}`}
+echo "Done! Connect via ${auth === "tailscale-serve" ? "wss://<your-mac>.<your-tailnet>.ts.net/v1/ws" : `ws://<lan-or-vpn-ip>:${port}/v1/ws`}"
 `);
           break;
         }
@@ -548,21 +574,22 @@ echo "Done! Connect via wss://<your-mac>.<your-tailnet>.ts.net/v1/ws"
           : `User=\${SUDO_USER:-$(whoami)}`;
         console.log(`#!/usr/bin/env bash
 set -euo pipefail
-# Run on your remote Tailnet Linux server after copying agent-remote-node-linux-* to /usr/local/bin/agent-remote-node
+# Run on your remote Linux server after copying agent-remote-node-linux-* to /usr/local/bin/agent-remote-node
 # Runs under the same user account that logged in to agy / claude / codex so OAuth credentials and /snap/bin are accessible.
 RUN_USER="${runUser ?? "${SUDO_USER:-$(whoami)}"}"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+mkdir -p "\${RUN_HOME}/.config/agent-remote"
 cat <<EOF | sudo tee /etc/systemd/system/agent-remote-node.service
 [Unit]
-Description=agent-remote Remote Tailnet Node
-After=network-online.target tailscaled.service
+Description=agent-remote Remote Node
+After=network-online.target
 
 [Service]
 Type=simple
 ${runUser ? userLine : "User=${RUN_USER}"}
 Environment="HOME=\${RUN_HOME}"
 Environment="PATH=\${RUN_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
-ExecStart=/usr/local/bin/agent-remote-node --listen 127.0.0.1:${port} --auth-mode ${auth}${extraFlags ? " " + extraFlags : ""}
+ExecStart=/usr/local/bin/agent-remote-node --listen ${listenHost}:${port} --auth-mode ${auth}${extraFlags ? " " + extraFlags : ""}
 Restart=always
 RestartSec=2
 
@@ -571,12 +598,12 @@ WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-remote-node
-${auth === "tailscale-serve" ? `sudo tailscale serve --bg http://127.0.0.1:${port}` : "# Listening with tailscaled-whois auth"}
-echo "Done! Connect via wss://<your-host>.<your-tailnet>.ts.net/v1/ws"
+${auth === "tailscale-serve" ? `sudo tailscale serve --bg http://127.0.0.1:${port}` : auth === "pubkey" ? `# Append client public keys (one per line) to \${RUN_HOME}/.config/agent-remote/authorized_keys (hot-reloaded automatically)` : `# Listening with --auth-mode ${auth}`}
+echo "Done! Connect via ${auth === "tailscale-serve" ? "wss://<your-host>.<your-tailnet>.ts.net/v1/ws" : `ws://<lan-or-vpn-ip>:${port}/v1/ws`}"
 `);
         break;
       }
-      console.error("Usage: ar node deploy-script [--os linux|macos] [--user <user>] [--port 19420] [--auth tailscale-serve|tailscaled-whois] [--allowed-users <csv>] [--work-base-dir <dir>]");
+      console.error("Usage: ar node deploy-script [--os linux|macos] [--user <user>] [--port 19420] [--listen-host 0.0.0.0|127.0.0.1] [--auth tailscale-serve|tailscaled-whois|pubkey|token] [--allowed-users <csv>] [--work-base-dir <dir>]");
       process.exit(1);
     }
 

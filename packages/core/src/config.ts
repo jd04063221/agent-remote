@@ -15,9 +15,12 @@ const HostEntrySchema = z.object({
   transport: z.union([TransportModeSchema, z.literal("local")]).default("tailnet-direct"),
   endpoint: z.string().default(""),
   auth: z
-    .enum(["tailscale-serve", "tailscaled-whois", "dev-token", "none"])
+    .enum(["tailscale-serve", "tailscaled-whois", "pubkey", "dev-token", "none"])
     .default("tailscale-serve"),
   bearer_token: z.string().optional(),
+  private_key_pem: z.string().optional(),
+  private_key_path: z.string().optional(),
+  public_key: z.string().optional(),
   ssh_target: z.string().optional(),
   ssh_args: z.array(z.string()).default([]),
   max_concurrent_sessions: z.number().int().positive().default(8),

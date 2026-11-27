@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -219,5 +220,103 @@ describe("AgentRemoteHub + Go remote-node live integration", () => {
     const started2 = await hub2.listen(started1.port, "127.0.0.1");
     expect(started2.port).toBe(started1.port);
     await hub2.close();
+  });
+
+  it("authenticates live against Go remote-node using Ed25519 pubkey auth with hot-reloaded authorized_keys", async () => {
+    if (!fs.existsSync(GO_NODE_BIN)) return;
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ar-pubkey-test-"));
+    const authKeysFile = path.join(tmpDir, "authorized_keys");
+    fs.writeFileSync(authKeysFile, "# initially empty\n", "utf8");
+    const pkPort = 19493;
+
+    const pkNode = spawn(
+      GO_NODE_BIN,
+      [
+        "--listen",
+        `127.0.0.1:${pkPort}`,
+        "--auth-mode",
+        "pubkey",
+        "--authorized-keys-file",
+        authKeysFile,
+      ],
+      { stdio: "ignore" },
+    );
+
+    try {
+      await new Promise((r) => setTimeout(r, 350));
+
+      // 1. Verify API key & Ed25519 keygen endpoints
+      const tokRes = await fetch(`${hubUrl}/api/auth/keygen`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "token" }),
+      });
+      expect(tokRes.status).toBe(200);
+      const tokBody = (await tokRes.json()) as { token: string };
+      expect(tokBody.token).toMatch(/^ar_sk_/);
+
+      const kgRes = await fetch(`${hubUrl}/api/auth/keygen`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "ed25519", comment: "lan-win-gui" }),
+      });
+      expect(kgRes.status).toBe(200);
+      const kg = (await kgRes.json()) as {
+        privateKeyPem: string;
+        publicKey: string;
+        fingerprint: string;
+      };
+      expect(kg.publicKey).toMatch(/^ssh-ed25519 /);
+
+      // 2. Save host with bare IP:port (tests LAN auto-ws:// normalization) + pubkey auth
+      const saveRes = await fetch(`${hubUrl}/api/hosts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "lan-pubkey-node",
+          name: "lan-win-gui",
+          transport: "tailnet-direct",
+          endpoint: `127.0.0.1:${pkPort}`,
+          authMode: "pubkey",
+          privateKeyPem: kg.privateKeyPem,
+          maxSessions: 4,
+        }),
+      });
+      expect(saveRes.status).toBe(200);
+      const saveBody = (await saveRes.json()) as {
+        host: { endpoint: string; privateKeyPem?: string; hasPrivateKey?: boolean; publicKey?: string };
+      };
+      expect(saveBody.host.endpoint).toBe(`ws://127.0.0.1:${pkPort}/v1/ws`);
+      expect(saveBody.host.privateKeyPem).toBeUndefined();
+      expect(saveBody.host.hasPrivateKey).toBe(true);
+      expect(saveBody.host.publicKey).toBe(kg.publicKey);
+
+      // 3. Before adding publicKey to remote authorized_keys -> rejected with HTTP 401
+      const failProbe = await fetch(`${hubUrl}/api/hosts/lan-pubkey-node/probe`, { method: "POST" });
+      expect(failProbe.status).toBe(500);
+
+      // 4. Append publicKey to authorized_keys WITHOUT restarting Go remote-node -> hot-reloads & succeeds!
+      fs.writeFileSync(authKeysFile, `${kg.publicKey}\n`, "utf8");
+      const future = new Date(Date.now() + 2000);
+      fs.utimesSync(authKeysFile, future, future);
+
+      const okProbe = await fetch(`${hubUrl}/api/hosts/lan-pubkey-node/probe`, { method: "POST" });
+      expect(okProbe.status).toBe(200);
+      const okBody = (await okProbe.json()) as {
+        ok: boolean;
+        state: { hosts: Array<{ id: string; connected: boolean; peerUser?: string; hasPrivateKey?: boolean }> };
+      };
+      expect(okBody.ok).toBe(true);
+      const liveHost = okBody.state.hosts.find((h) => h.id === "lan-pubkey-node");
+      expect(liveHost?.connected).toBe(true);
+      expect(liveHost?.peerUser).toBe("lan-win-gui");
+      expect(liveHost?.hasPrivateKey).toBe(true);
+
+      await fetch(`${hubUrl}/api/hosts/lan-pubkey-node`, { method: "DELETE" });
+    } finally {
+      pkNode.kill("SIGTERM");
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

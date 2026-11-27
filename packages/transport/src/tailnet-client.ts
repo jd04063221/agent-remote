@@ -8,15 +8,18 @@ import type {
   SessionReadyPayload,
   SpawnSessionPayload,
 } from "@agent-remote/protocol";
+import { buildEd25519AuthHeader } from "./ed25519-auth.js";
 
 /**
- * Normalizes user-entered Tailnet / local node URLs into a valid WebSocket `/v1/ws` endpoint.
+ * Normalizes user-entered Tailnet / LAN / VPN / local node URLs into a valid WebSocket `/v1/ws` endpoint.
  * Examples:
  * - `https://box.tail.ts.net` -> `wss://box.tail.ts.net/v1/ws`
  * - `https://box.tail.ts.net/healthz` -> `wss://box.tail.ts.net/v1/ws`
  * - `wss://box.tail.ts.net/` -> `wss://box.tail.ts.net/v1/ws`
  * - `box.tail.ts.net` -> `wss://box.tail.ts.net/v1/ws`
  * - `127.0.0.1:19420` -> `ws://127.0.0.1:19420/v1/ws`
+ * - `192.168.1.50:19420` -> `ws://192.168.1.50:19420/v1/ws`
+ * - `10.8.0.2:19420` -> `ws://10.8.0.2:19420/v1/ws`
  */
 export function normalizeTailnetEndpoint(raw: string): string {
   const trimmed = raw.trim();
@@ -25,7 +28,11 @@ export function normalizeTailnetEndpoint(raw: string): string {
   let candidate = trimmed;
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(candidate)) {
     const isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(candidate);
-    candidate = `${isLoopback ? "ws" : "wss"}://${candidate}`;
+    // Direct IP:port targets on LAN / OpenVPN / WireGuard (e.g. 192.168.1.50:19420,
+    // 10.8.0.2:19420, [fd00::1]:19420) speak plain HTTP/WS unless port 443 is used.
+    const isDirectIpWithPort =
+      /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\]):(?!443(?:\/|$))\d+(?:\/|$)/.test(candidate);
+    candidate = `${isLoopback || isDirectIpWithPort ? "ws" : "wss"}://${candidate}`;
   }
 
   try {
@@ -50,6 +57,8 @@ export interface TailnetClientOptions {
   endpoint: string;
   headers?: Record<string, string>;
   bearerToken?: string;
+  /** PKCS#8 or unencrypted OpenSSH Ed25519 private key PEM for `pubkey` auth mode. */
+  privateKeyPem?: string;
   autoReconnect?: boolean;
 }
 
@@ -185,6 +194,7 @@ export class TailnetDirectClient extends EventEmitter {
   readonly hostId: string;
   readonly endpoint: string;
   private readonly headers: Record<string, string>;
+  private readonly privateKeyPem?: string;
   private readonly autoReconnect: boolean;
 
   private ws?: WebSocket;
@@ -208,7 +218,8 @@ export class TailnetDirectClient extends EventEmitter {
     this.endpoint = normalizeTailnetEndpoint(options.endpoint);
     this.autoReconnect = options.autoReconnect ?? true;
     this.headers = { ...(options.headers ?? {}) };
-    if (options.bearerToken) {
+    this.privateKeyPem = options.privateKeyPem?.trim() || undefined;
+    if (!this.privateKeyPem && options.bearerToken) {
       this.headers.Authorization = `Bearer ${options.bearerToken}`;
     }
   }
@@ -249,8 +260,19 @@ export class TailnetDirectClient extends EventEmitter {
 
       let ws: WebSocket;
       try {
+        // Compute fresh headers per connection attempt so Ed25519 pubkey auth
+        // uses a fresh timestamp & unique nonce on every reconnect.
+        const connectHeaders: Record<string, string> = { ...this.headers };
+        if (this.privateKeyPem) {
+          const parsedUrl = new URL(this.endpoint);
+          connectHeaders.Authorization = buildEd25519AuthHeader(
+            this.privateKeyPem,
+            "GET",
+            parsedUrl.pathname || "/v1/ws",
+          );
+        }
         ws = new WebSocket(this.endpoint, {
-          headers: this.headers,
+          headers: connectHeaders,
           handshakeTimeout: timeoutMs,
         });
       } catch (err) {

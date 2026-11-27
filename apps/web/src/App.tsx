@@ -150,6 +150,10 @@ export function App() {
     authMode: "tailscale-serve",
     bearerToken: "",
     hasBearerToken: false,
+    privateKeyPem: "",
+    hasPrivateKey: false,
+    publicKey: "",
+    keyFingerprint: "",
     maxSessions: 8,
   });
   const [profileDraft, setProfileDraft] = useState({
@@ -559,17 +563,104 @@ export function App() {
     }
   };
 
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(t("modal.host.copied"));
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      notify(t("modal.host.copied"));
+    }
+  };
+
+  const handleGenerateEd25519 = async () => {
+    try {
+      const res = await api<{
+        ok: boolean;
+        privateKeyPem: string;
+        publicKey: string;
+        fingerprint: string;
+      }>("/api/auth/keygen", {
+        method: "POST",
+        body: JSON.stringify({
+          type: "ed25519",
+          comment: hostDraft.id.trim() || hostDraft.name.trim() || "agent-remote-gui",
+        }),
+      });
+      setHostDraft((prev) => ({
+        ...prev,
+        privateKeyPem: res.privateKeyPem,
+        publicKey: res.publicKey,
+        keyFingerprint: res.fingerprint,
+      }));
+      notify(t("modal.host.keypairGenerated"));
+    } catch (e) {
+      notify(t("toast.saveFailed", { msg: (e as Error).message }));
+    }
+  };
+
+  const handleDerivePubkey = async () => {
+    if (!hostDraft.privateKeyPem.trim()) return;
+    try {
+      const res = await api<{
+        ok: boolean;
+        privateKeyPem: string;
+        publicKey: string;
+        fingerprint: string;
+      }>("/api/auth/keygen", {
+        method: "POST",
+        body: JSON.stringify({
+          type: "ed25519",
+          comment: hostDraft.id.trim() || hostDraft.name.trim() || "agent-remote-gui",
+          importPrivateKey: hostDraft.privateKeyPem,
+        }),
+      });
+      setHostDraft((prev) => ({
+        ...prev,
+        privateKeyPem: res.privateKeyPem,
+        publicKey: res.publicKey,
+        keyFingerprint: res.fingerprint,
+      }));
+    } catch (e) {
+      notify(t("toast.saveFailed", { msg: (e as Error).message }));
+    }
+  };
+
+  const handleGenerateApiKey = async () => {
+    try {
+      const res = await api<{ ok: boolean; token: string }>("/api/auth/keygen", {
+        method: "POST",
+        body: JSON.stringify({ type: "token" }),
+      });
+      setHostDraft((prev) => ({ ...prev, bearerToken: res.token }));
+      notify(t("modal.host.tokenGenerated"));
+    } catch (e) {
+      notify(t("toast.saveFailed", { msg: (e as Error).message }));
+    }
+  };
+
   const openNewHostModal = () => {
     setEditingHostId(null);
     setHostDraft({
       id: state.hosts.length === 0 ? "us-vps" : "",
-      name: state.hosts.length === 0 ? "Tailnet Remote Node" : "",
+      name: state.hosts.length === 0 ? "Remote Node" : "",
       transport: "tailnet-direct",
       endpoint: "",
       sshTarget: "",
       authMode: "tailscale-serve",
       bearerToken: "",
       hasBearerToken: false,
+      privateKeyPem: "",
+      hasPrivateKey: false,
+      publicKey: "",
+      keyFingerprint: "",
       maxSessions: 8,
     });
     setModal("host");
@@ -586,6 +677,10 @@ export function App() {
       authMode: h.authMode,
       bearerToken: "",
       hasBearerToken: Boolean(h.hasBearerToken),
+      privateKeyPem: "",
+      hasPrivateKey: Boolean(h.hasPrivateKey),
+      publicKey: h.publicKey ?? "",
+      keyFingerprint: "",
       maxSessions: h.maxSessions || 8,
     });
     setModal("host");
@@ -1860,7 +1955,7 @@ export function App() {
               <label>
                 {t("modal.host.endpoint")}
                 <input
-                  placeholder="wss://<host>.<tailnet>.ts.net/v1/ws"
+                  placeholder="wss://<host>.ts.net  or  192.168.1.50:19420"
                   value={hostDraft.endpoint}
                   onChange={(e) => setHostDraft({ ...hostDraft, endpoint: e.target.value })}
                 />
@@ -1886,25 +1981,143 @@ export function App() {
                     onChange={(e) => setHostDraft({ ...hostDraft, authMode: e.target.value })}
                   >
                     <option value="tailscale-serve">{t("modal.host.authServe")}</option>
-                    <option value="tailscaled-whois">{t("modal.host.authWhois")}</option>
+                    <option value="pubkey">{t("modal.host.authPubkey")}</option>
                     <option value="dev-token">{t("modal.host.authToken")}</option>
+                    <option value="tailscaled-whois">{t("modal.host.authWhois")}</option>
                   </select>
                 </label>
-                {hostDraft.authMode === "dev-token" && (
-                  <label>
-                    {t("modal.host.bearerToken")}
-                    <input
-                      type="password"
-                      placeholder={
-                        editingHostId && hostDraft.hasBearerToken
-                          ? t("modal.host.bearerTokenKeepHint")
-                          : ""
-                      }
-                      value={hostDraft.bearerToken}
-                      onChange={(e) => setHostDraft({ ...hostDraft, bearerToken: e.target.value })}
-                    />
-                  </label>
-                )}
+                {hostDraft.authMode === "pubkey" && (() => {
+                  const remoteCmd = hostDraft.publicKey
+                    ? `mkdir -p ~/.config/agent-remote && echo '${hostDraft.publicKey}' >> ~/.config/agent-remote/authorized_keys\nagent-remote-node --listen 0.0.0.0:19420 --auth-mode pubkey`
+                    : `agent-remote-node --listen 0.0.0.0:19420 --auth-mode pubkey`;
+                  return (
+                    <>
+                      <div className="key-action-row">
+                        <button
+                          type="button"
+                          className="btn sm primary"
+                          onClick={() => void handleGenerateEd25519()}
+                        >
+                          {t("modal.host.generateKeypair")}
+                        </button>
+                        {hostDraft.publicKey && (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => void copyToClipboard(hostDraft.publicKey)}
+                          >
+                            {t("modal.host.copyPubkey")}
+                          </button>
+                        )}
+                        {hostDraft.privateKeyPem.trim() && !hostDraft.publicKey && (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => void handleDerivePubkey()}
+                          >
+                            {t("modal.host.derivePubkey")}
+                          </button>
+                        )}
+                      </div>
+                      {hostDraft.publicKey && (
+                        <label>
+                          {t("modal.host.publicKey")}
+                          <pre className="key-box">{hostDraft.publicKey}</pre>
+                          {hostDraft.keyFingerprint && (
+                            <span className="field-hint">{hostDraft.keyFingerprint}</span>
+                          )}
+                        </label>
+                      )}
+                      <label>
+                        {t("modal.host.privateKey")}
+                        <textarea
+                          rows={3}
+                          placeholder={
+                            editingHostId && hostDraft.hasPrivateKey
+                              ? t("modal.host.privateKeyKeepHint")
+                              : "-----BEGIN PRIVATE KEY-----  or  -----BEGIN OPENSSH PRIVATE KEY-----"
+                          }
+                          value={hostDraft.privateKeyPem}
+                          onChange={(e) =>
+                            setHostDraft({ ...hostDraft, privateKeyPem: e.target.value })
+                          }
+                          onBlur={() => {
+                            if (hostDraft.privateKeyPem.trim()) {
+                              void handleDerivePubkey();
+                            }
+                          }}
+                        />
+                      </label>
+                      <label>
+                        <div className="key-action-row">
+                          <span>{t("modal.host.remoteSetupHint")}</span>
+                          <button
+                            type="button"
+                            className="btn xs"
+                            onClick={() => void copyToClipboard(remoteCmd)}
+                          >
+                            {t("modal.host.copyNodeCmd")}
+                          </button>
+                        </div>
+                        <pre className="cmd-preview">{remoteCmd}</pre>
+                      </label>
+                    </>
+                  );
+                })()}
+                {hostDraft.authMode === "dev-token" && (() => {
+                  const tokenPreview = hostDraft.bearerToken.trim() || "<YOUR_API_KEY>";
+                  const remoteTokenCmd = `agent-remote-node --listen 0.0.0.0:19420 --auth-mode token --token '${tokenPreview}'`;
+                  return (
+                    <>
+                      <label>
+                        {t("modal.host.bearerToken")}
+                        <div className="key-input-row">
+                          <input
+                            type="password"
+                            placeholder={
+                              editingHostId && hostDraft.hasBearerToken
+                                ? t("modal.host.bearerTokenKeepHint")
+                                : "ar_sk_..."
+                            }
+                            value={hostDraft.bearerToken}
+                            onChange={(e) =>
+                              setHostDraft({ ...hostDraft, bearerToken: e.target.value })
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => void handleGenerateApiKey()}
+                          >
+                            {t("modal.host.generateToken")}
+                          </button>
+                          {hostDraft.bearerToken.trim() && (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              onClick={() => void copyToClipboard(hostDraft.bearerToken.trim())}
+                            >
+                              {t("modal.host.copyToken")}
+                            </button>
+                          )}
+                        </div>
+                      </label>
+                      <label>
+                        <div className="key-action-row">
+                          <span>{t("modal.host.remoteSetupHint")}</span>
+                          <button
+                            type="button"
+                            className="btn xs"
+                            onClick={() => void copyToClipboard(remoteTokenCmd)}
+                          >
+                            {t("modal.host.copyNodeCmd")}
+                          </button>
+                        </div>
+                        <pre className="cmd-preview">{remoteTokenCmd}</pre>
+                      </label>
+                    </>
+                  );
+                })()}
               </>
             )}
             <div className="modal-actions">
@@ -1928,6 +2141,14 @@ export function App() {
                 onClick={async () => {
                   const hostId = hostDraft.id.trim();
                   if (!hostId) return notify(t("toast.hostIdRequired"));
+                  if (
+                    hostDraft.transport === "tailnet-direct" &&
+                    hostDraft.authMode === "pubkey" &&
+                    !hostDraft.privateKeyPem.trim() &&
+                    !hostDraft.hasPrivateKey
+                  ) {
+                    return notify(t("modal.host.pubkeyRequired"));
+                  }
                   const hostName = hostDraft.name.trim() || hostId;
                   try {
                     const r = await api<{ ok: boolean; state?: HubStateSnapshot }>("/api/hosts", {
@@ -1942,6 +2163,10 @@ export function App() {
                         bearerToken:
                           hostDraft.authMode === "dev-token"
                             ? hostDraft.bearerToken.trim() || undefined
+                            : undefined,
+                        privateKeyPem:
+                          hostDraft.authMode === "pubkey"
+                            ? hostDraft.privateKeyPem.trim() || undefined
                             : undefined,
                         maxSessions: hostDraft.maxSessions,
                       }),

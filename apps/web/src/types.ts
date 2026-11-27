@@ -6,8 +6,10 @@ export interface HostState {
   transport: "tailnet-direct" | "tailscale-ssh" | "openssh" | "local";
   endpoint: string;
   sshTarget?: string;
-  authMode: "tailscale-serve" | "tailscaled-whois" | "dev-token" | "none";
+  authMode: "tailscale-serve" | "tailscaled-whois" | "pubkey" | "dev-token" | "none";
   hasBearerToken?: boolean;
+  hasPrivateKey?: boolean;
+  publicKey?: string;
   maxSessions: number;
   connected: boolean;
   rttMs?: number;

@@ -17,10 +17,13 @@ import (
 )
 
 func main() {
-	listenAddr := flag.String("listen", "127.0.0.1:19420", "Listen address (bind 127.0.0.1 when behind tailscale serve)")
-	authMode := flag.String("auth-mode", string(auth.ModeTailscaleServe), "Auth mode: tailscale-serve | tailscaled-whois | dev-token")
-	allowedUsers := flag.String("allowed-users", "", "Comma-separated allowed Tailscale user logins (empty = any peer in tailnet)")
-	devToken := flag.String("dev-token", os.Getenv("AGENT_REMOTE_DEV_TOKEN"), "Bearer token for dev-token mode")
+	listenAddr := flag.String("listen", "127.0.0.1:19420", "Listen address (bind 127.0.0.1 when behind tailscale serve, or 0.0.0.0:19420 for LAN/VPN)")
+	authMode := flag.String("auth-mode", string(auth.ModeTailscaleServe), "Auth mode: tailscale-serve | tailscaled-whois | pubkey | token | dev-token")
+	allowedUsers := flag.String("allowed-users", "", "Comma-separated allowed Tailscale user logins or key labels (empty = any authorized identity)")
+	devToken := flag.String("dev-token", os.Getenv("AGENT_REMOTE_DEV_TOKEN"), "Bearer API key for token / dev-token mode")
+	apiToken := flag.String("token", os.Getenv("AGENT_REMOTE_TOKEN"), "Alias for --dev-token (Bearer API key for token / dev-token mode)")
+	authorizedKeys := flag.String("authorized-keys", os.Getenv("AGENT_REMOTE_AUTHORIZED_KEYS"), "Authorized Ed25519 public keys for pubkey mode (ssh-ed25519 ... lines, semicolon or newline separated)")
+	authorizedKeysFile := flag.String("authorized-keys-file", os.Getenv("AGENT_REMOTE_AUTHORIZED_KEYS_FILE"), "Path to authorized_keys file for pubkey mode (defaults to ~/.config/agent-remote/authorized_keys)")
 	tailscaledSock := flag.String("tailscaled-sock", "/var/run/tailscale/tailscaled.sock", "Path to tailscaled Unix socket")
 	workBaseDir := flag.String("work-base-dir", os.Getenv("AGENT_REMOTE_WORK_BASE_DIR"), "Base directory for per-session isolated workdirs (auto-switches to Snap-shared dir for /snap/bin/* CLIs)")
 	envFilePath := flag.String("env-file", os.Getenv("AGENT_REMOTE_ENV_FILE"), "Optional dotenv file loaded at startup (defaults to ~/.config/agent-remote/node.env if present)")
@@ -39,8 +42,26 @@ func main() {
 			log.Printf("loaded %d environment variable(s) from %s", n, defEnv)
 		}
 	}
-	if *devToken == "" {
-		*devToken = os.Getenv("AGENT_REMOTE_DEV_TOKEN")
+	resolvedToken := strings.TrimSpace(*apiToken)
+	if resolvedToken == "" {
+		resolvedToken = strings.TrimSpace(*devToken)
+	}
+	if resolvedToken == "" {
+		resolvedToken = strings.TrimSpace(os.Getenv("AGENT_REMOTE_TOKEN"))
+	}
+	if resolvedToken == "" {
+		resolvedToken = strings.TrimSpace(os.Getenv("AGENT_REMOTE_DEV_TOKEN"))
+	}
+	resolvedAuthKeys := strings.TrimSpace(*authorizedKeys)
+	if resolvedAuthKeys == "" {
+		resolvedAuthKeys = strings.TrimSpace(os.Getenv("AGENT_REMOTE_AUTHORIZED_KEYS"))
+	}
+	resolvedAuthKeysFile := strings.TrimSpace(*authorizedKeysFile)
+	if resolvedAuthKeysFile == "" {
+		resolvedAuthKeysFile = strings.TrimSpace(os.Getenv("AGENT_REMOTE_AUTHORIZED_KEYS_FILE"))
+	}
+	if resolvedAuthKeysFile == "" {
+		resolvedAuthKeysFile = auth.DefaultAuthorizedKeysPath()
 	}
 
 	allowed := make(map[string]struct{})
@@ -51,10 +72,12 @@ func main() {
 	}
 
 	authenticator := auth.New(auth.Config{
-		Mode:           auth.Mode(*authMode),
-		AllowedUsers:   allowed,
-		DevToken:       *devToken,
-		TailscaledSock: *tailscaledSock,
+		Mode:               auth.Mode(*authMode),
+		AllowedUsers:       allowed,
+		DevToken:           resolvedToken,
+		AuthorizedKeys:     resolvedAuthKeys,
+		AuthorizedKeysFile: resolvedAuthKeysFile,
+		TailscaledSock:     *tailscaledSock,
 	})
 
 	nodeSrv := server.New(server.Config{

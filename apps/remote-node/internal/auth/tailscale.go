@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,14 +20,19 @@ type Mode string
 const (
 	ModeTailscaleServe Mode = "tailscale-serve"
 	ModeTailscaleWhoIs Mode = "tailscaled-whois"
+	ModePubKey         Mode = "pubkey"
+	ModeToken          Mode = "token"
 	ModeDevToken       Mode = "dev-token"
 )
 
 type Config struct {
-	Mode           Mode
-	AllowedUsers   map[string]struct{}
-	DevToken       string
-	TailscaledSock string
+	Mode               Mode
+	AllowedUsers       map[string]struct{}
+	DevToken           string
+	AuthorizedKeys     string
+	AuthorizedKeysFile string
+	TailscaledSock     string
+	NowFunc            func() time.Time
 }
 
 type Identity struct {
@@ -36,13 +42,38 @@ type Identity struct {
 
 type Authenticator struct {
 	cfg Config
+
+	mu          sync.Mutex
+	inlineKeys  []AuthorizedKey
+	fileKeys    []AuthorizedKey
+	fileModTime time.Time
+	fileSize    int64
+	fileLoaded  bool
+	seenNonces  map[string]time.Time
 }
 
 func New(cfg Config) *Authenticator {
 	if cfg.TailscaledSock == "" {
 		cfg.TailscaledSock = "/var/run/tailscale/tailscaled.sock"
 	}
-	return &Authenticator{cfg: cfg}
+	var inlineKeys []AuthorizedKey
+	if strings.TrimSpace(cfg.AuthorizedKeys) != "" {
+		if parsed, err := ParseAuthorizedKeysText(cfg.AuthorizedKeys); err == nil {
+			inlineKeys = parsed
+		}
+	}
+	return &Authenticator{
+		cfg:        cfg,
+		inlineKeys: inlineKeys,
+		seenNonces: make(map[string]time.Time),
+	}
+}
+
+func (a *Authenticator) now() time.Time {
+	if a.cfg.NowFunc != nil {
+		return a.cfg.NowFunc()
+	}
+	return time.Now()
 }
 
 func (a *Authenticator) VerifyRequest(r *http.Request) (Identity, error) {
@@ -51,7 +82,9 @@ func (a *Authenticator) VerifyRequest(r *http.Request) (Identity, error) {
 		return a.verifyTailscaleServe(r)
 	case ModeTailscaleWhoIs:
 		return a.verifyTailscaledWhoIs(r)
-	case ModeDevToken:
+	case ModePubKey:
+		return a.verifyPubKey(r)
+	case ModeDevToken, ModeToken:
 		return a.verifyDevToken(r)
 	default:
 		return Identity{}, fmt.Errorf("unsupported auth mode: %q", a.cfg.Mode)
