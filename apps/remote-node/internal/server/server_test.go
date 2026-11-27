@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -191,4 +193,58 @@ func TestWSSAuthProbeSpawnMcpAndReconnectReplay(t *testing.T) {
 
 	// 8. Cleanly kill session
 	_ = ws2.WriteJSON(protocol.Frame{Ch: ready.Channel, Type: protocol.TypeSessionKill})
+}
+
+func TestApplyEphemeralIsolation(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("SNAP_USER_COMMON", "")
+	t.Setenv("XDG_DATA_HOME", "")
+
+	// Seed realistic antigravity-cli dir with auth + existing conversations
+	realAgy := filepath.Join(fakeHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(realAgy, "conversations"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(realAgy, "antigravity-oauth-token"), []byte("tok"), 0o600)
+	_ = os.WriteFile(filepath.Join(realAgy, "settings.json"), []byte(`{}`), 0o600)
+	_ = os.WriteFile(filepath.Join(realAgy, "conversations", "old.db"), []byte("hist"), 0o600)
+
+	workdir := t.TempDir()
+	args, env := applyEphemeralIsolation("antigravity", "agy", workdir, []string{"acp", "--stdio"})
+	if len(env) != 0 {
+		t.Fatalf("unexpected env overrides for antigravity: %+v", env)
+	}
+	ephemGemini := filepath.Join(workdir, ".ephem-gemini")
+	if len(args) < 4 || args[len(args)-2] != "--gemini-dir" || args[len(args)-1] != ephemGemini {
+		t.Fatalf("expected --gemini-dir %s, got args=%v", ephemGemini, args)
+	}
+	ephemApp := filepath.Join(ephemGemini, "antigravity-cli")
+	if _, err := os.Stat(filepath.Join(ephemApp, "antigravity-oauth-token")); err != nil {
+		t.Fatalf("expected oauth token linked in ephemeral dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ephemApp, "conversations")); !os.IsNotExist(err) {
+		t.Fatalf("conversations dir must NOT be linked into ephemeral dir")
+	}
+
+	// Seed realistic opencode dir with auth.json + existing opencode.db
+	realOC := filepath.Join(fakeHome, ".local", "share", "opencode")
+	if err := os.MkdirAll(realOC, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(realOC, "auth.json"), []byte(`{"ok":true}`), 0o600)
+	_ = os.WriteFile(filepath.Join(realOC, "opencode.db"), []byte("old-db"), 0o600)
+
+	ocWorkdir := t.TempDir()
+	_, ocEnv := applyEphemeralIsolation("opencode", "opencode", ocWorkdir, []string{"acp"})
+	expectedXdg := filepath.Join(ocWorkdir, ".ephem-xdg-data")
+	if ocEnv["XDG_DATA_HOME"] != expectedXdg {
+		t.Fatalf("expected XDG_DATA_HOME=%s, got %q", expectedXdg, ocEnv["XDG_DATA_HOME"])
+	}
+	if _, err := os.Stat(filepath.Join(expectedXdg, "opencode", "auth.json")); err != nil {
+		t.Fatalf("expected opencode auth.json linked: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(expectedXdg, "opencode", "opencode.db")); !os.IsNotExist(err) {
+		t.Fatalf("opencode.db must NOT be linked into ephemeral XDG dir")
+	}
 }

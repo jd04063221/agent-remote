@@ -379,19 +379,27 @@ func (s *Server) handleSpawn(conn *activeConn, reqID string, req protocol.SpawnS
 		expandedArgs[i] = replacer.Replace(a)
 	}
 
+	var ephemEnv map[string]string
+	if req.EphemeralRemote {
+		expandedArgs, ephemEnv = applyEphemeralIsolation(req.Agent, resolvedCmd, workdir, expandedArgs)
+	}
+
 	execBin, execArgs := prepareExecCommand(runtime.GOOS, resolvedCmd, expandedArgs)
 	cmd := exec.CommandContext(sessCtx, execBin, execArgs...)
 	configureProcGroup(cmd)
 	cmd.Dir = emptyDir
 	env := buildAugmentedEnv(os.Environ())
-	env = append(env, "AGENT_REMOTE_SESSION_ID="+req.SessionID)
-	env = append(env, "AGENT_REMOTE_WORKDIR="+workdir)
+	env = setEnvVar(env, "AGENT_REMOTE_SESSION_ID", req.SessionID)
+	env = setEnvVar(env, "AGENT_REMOTE_WORKDIR", workdir)
 	if sess.mcpBridge != nil {
-		env = append(env, "AGENT_REMOTE_MCP_URL="+sess.mcpBridge.EndpointURL())
-		env = append(env, "AGENT_REMOTE_MCP_TOKEN="+sess.mcpBridge.BearerToken())
+		env = setEnvVar(env, "AGENT_REMOTE_MCP_URL", sess.mcpBridge.EndpointURL())
+		env = setEnvVar(env, "AGENT_REMOTE_MCP_TOKEN", sess.mcpBridge.BearerToken())
 	}
 	for k, v := range req.Env {
-		env = append(env, k+"="+v)
+		env = setEnvVar(env, k, v)
+	}
+	for k, v := range ephemEnv {
+		env = setEnvVar(env, k, v)
 	}
 	cmd.Env = env
 
@@ -727,4 +735,109 @@ func buildAugmentedEnv(base []string) []string {
 		out = append(out, "PATH="+probe.AugmentedPath(""))
 	}
 	return out
+}
+
+func setEnvVar(env []string, key, value string) []string {
+	for i, entry := range env {
+		if idx := strings.IndexByte(entry, '='); idx > 0 && strings.EqualFold(entry[:idx], key) {
+			env[i] = key + "=" + value
+			return env
+		}
+	}
+	return append(env, key+"="+value)
+}
+
+func linkOrCopyFile(src, dst string) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return
+	}
+	if err := os.Symlink(src, dst); err == nil {
+		return
+	}
+	if info.IsDir() {
+		return
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(dst, data, info.Mode().Perm())
+}
+
+// applyEphemeralIsolation redirects agent conversation/history storage into the session's
+// temporary workdir (which is wiped on exit by os.RemoveAll) while symlinking only auth & config files,
+// guaranteeing zero persistent conversation records remain on the remote host in incognito mode.
+func applyEphemeralIsolation(agent, resolvedCmd, workdir string, args []string) ([]string, map[string]string) {
+	envOverrides := make(map[string]string)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return args, envOverrides
+	}
+
+	switch agent {
+	case "antigravity":
+		for _, a := range args {
+			if a == "--gemini-dir" || a == "--gemini_dir" ||
+				strings.HasPrefix(a, "--gemini-dir=") || strings.HasPrefix(a, "--gemini_dir=") {
+				return args, envOverrides
+			}
+		}
+		candidates := make([]string, 0, 3)
+		if snapCommon := strings.TrimSpace(os.Getenv("SNAP_USER_COMMON")); snapCommon != "" {
+			candidates = append(candidates, filepath.Join(snapCommon, ".gemini", "antigravity-cli"))
+		}
+		if runtime.GOOS == "linux" || isSnapBinary(resolvedCmd) {
+			candidates = append(candidates, filepath.Join(home, "snap", "antigravity-cli", "common", ".gemini", "antigravity-cli"))
+		}
+		candidates = append(candidates, filepath.Join(home, ".gemini", "antigravity-cli"))
+
+		srcAppDir := ""
+		for _, c := range candidates {
+			if info, err := os.Stat(c); err == nil && info.IsDir() {
+				srcAppDir = c
+				break
+			}
+		}
+		if srcAppDir == "" {
+			return args, envOverrides
+		}
+
+		ephemGemini := filepath.Join(workdir, ".ephem-gemini")
+		ephemAppDir := filepath.Join(ephemGemini, "antigravity-cli")
+		if err := os.MkdirAll(ephemAppDir, 0o700); err != nil {
+			return args, envOverrides
+		}
+		for _, entry := range []string{
+			"antigravity-oauth-token",
+			"settings.json",
+			"installation_id",
+			"jetski_state.pbtxt",
+			"builtin",
+			"bin",
+			"mcp",
+		} {
+			linkOrCopyFile(filepath.Join(srcAppDir, entry), filepath.Join(ephemAppDir, entry))
+		}
+		outArgs := append(append([]string(nil), args...), "--gemini-dir", ephemGemini)
+		return outArgs, envOverrides
+
+	case "opencode":
+		srcBase := filepath.Join(home, ".local", "share", "opencode")
+		if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
+			srcBase = filepath.Join(xdg, "opencode")
+		}
+		ephemXdg := filepath.Join(workdir, ".ephem-xdg-data")
+		ephemOpenCode := filepath.Join(ephemXdg, "opencode")
+		if err := os.MkdirAll(ephemOpenCode, 0o700); err != nil {
+			return args, envOverrides
+		}
+		for _, entry := range []string{"auth.json", "mcp-auth.json"} {
+			linkOrCopyFile(filepath.Join(srcBase, entry), filepath.Join(ephemOpenCode, entry))
+		}
+		envOverrides["XDG_DATA_HOME"] = ephemXdg
+		return args, envOverrides
+	}
+
+	return args, envOverrides
 }

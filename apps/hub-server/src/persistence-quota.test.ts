@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { formatLocalHistoryContext } from "@agent-remote/core";
+import { buildQuotaSaverGuidance, formatLocalHistoryContext } from "@agent-remote/core";
 import { AgentRemoteHub } from "./hub.js";
 import { HubStore } from "./store.js";
 
@@ -267,6 +267,46 @@ describe("Hub persistence, cross-restart resume, incognito mode, exact usage, an
     } finally {
       delete process.env.FAKE_CODEX_LOG;
     }
+  });
+
+  it("includes subagent findings in restored local history and advertises LOCAL worker delegation guidance", () => {
+    const restored = formatLocalHistoryContext([
+      { kind: "user_message", payload: { text: "Scan the repository architecture" } },
+      {
+        kind: "subagent_completed",
+        payload: {
+          subagentName: "explorer",
+          ok: true,
+          text: "Found entry points in apps/hub-server/src/hub.ts and apps/web/src/App.tsx.",
+        },
+      },
+      { kind: "text_delta", payload: { text: "Summary complete." } },
+    ]);
+    expect(restored).toContain("User: Scan the repository architecture");
+    expect(restored).toContain("Subagent(explorer): Found entry points");
+    expect(restored).toContain("Assistant: Summary complete.");
+
+    const guidance = buildQuotaSaverGuidance(
+      [
+        {
+          blueprint: {
+            name: "explorer",
+            description: "Fast codebase scan",
+            systemPrompt: "",
+            tools: ["read_file", "glob", "grep", "list_dir"],
+            executionMode: "federated",
+          },
+          targetLabel: "local-pc/local-opencode",
+          model: "opencode-go/deepseek-v4.1-flash",
+          isLocalHost: true,
+        },
+      ],
+      { quotaSaverMode: true },
+    );
+    expect(guidance).toContain("MANDATORY DELEGATION RULE");
+    expect(guidance).toContain("dispatch_subagent");
+    expect(guidance).toContain("LOCAL worker (local-pc/local-opencode)");
+    expect(guidance).toContain("opencode-go/deepseek-v4.1-flash");
   });
 });
 

@@ -8,6 +8,7 @@ export interface OpenCodeLaunchOptions {
   /** When true, strips all tools so OpenCode acts as a pure fast low-cost inference endpoint (`call_remote_model`). */
   pureInferenceOnly?: boolean;
   enableMcpBridge?: boolean;
+  ephemeralRemote?: boolean;
 }
 
 /**
@@ -50,5 +51,6 @@ export function buildOpenCodeSpawnSpec(options: OpenCodeLaunchOptions): SpawnSes
     },
     ephemeralFiles: {},
     enableMcpBridge: options.pureInferenceOnly ? false : (options.enableMcpBridge ?? true),
+    ephemeralRemote: options.ephemeralRemote,
   };
 }

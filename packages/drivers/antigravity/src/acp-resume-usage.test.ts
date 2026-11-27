@@ -115,4 +115,38 @@ describe("ACP driver: session/load resume, history replay suppression, and exact
     expect(started.resumed).toBe(false);
     expect(acp.getRemoteSessionId()).toBe("fresh-acp-2");
   });
+
+  it("prefers session/resume over session/load when sessionCapabilities.resume is advertised", async () => {
+    const ch = new MockAcpChannel();
+    const engine = new LocalToolEngine({
+      sandbox: new WorkspaceSandbox({ workspaceRoot: os.tmpdir(), readOnly: true }),
+      policy: new PolicyEngine({ mode: "plan" }),
+    });
+    const acp = new AcpRemoteSession({ channel: ch, toolEngine: engine, sessionId: "acp-3" });
+    const called: string[] = [];
+
+    ch.on("mock_in", (msg: Record<string, unknown>) => {
+      called.push(String(msg.method));
+      if (msg.method === "initialize") {
+        ch.reply({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            agentCapabilities: {
+              loadSession: true,
+              sessionCapabilities: { resume: {}, load: {} },
+            },
+          },
+        });
+      } else if (msg.method === "session/resume") {
+        ch.reply({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "resumed-conv-77" } });
+      }
+    });
+
+    await acp.initialize();
+    const started = await acp.resumeOrStartSession({ resumeSessionId: "resumed-conv-77" });
+    expect(started.resumed).toBe(true);
+    expect(acp.getRemoteSessionId()).toBe("resumed-conv-77");
+    expect(called).toEqual(["initialize", "session/resume"]);
+  });
 });

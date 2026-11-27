@@ -96,6 +96,7 @@ export function buildSpawnSpecForAgent(input: DriverBootstrapInput): {
         localGitBranch: input.localGitBranch,
         quotaSaverPrompt: input.quotaSaverPrompt,
         enableMcpBridge: !input.pureInferenceOnly,
+        ephemeralRemote: input.ephemeralRemote,
       });
 
     case "opencode":
@@ -106,6 +107,7 @@ export function buildSpawnSpecForAgent(input: DriverBootstrapInput): {
           model: input.model,
           pureInferenceOnly: input.pureInferenceOnly,
           enableMcpBridge: !input.pureInferenceOnly,
+          ephemeralRemote: input.ephemeralRemote,
         }),
       };
 

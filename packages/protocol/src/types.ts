@@ -203,6 +203,8 @@ export const SpawnSessionPayloadSchema = z.object({
   /** Files materialized into the session's ephemeral isolated directory before launching the CLI. */
   ephemeralFiles: z.record(z.string(), z.string()).default({}),
   enableMcpBridge: z.boolean().default(true),
+  /** When true, remote-node / local-channel isolates agent history storage into the session workdir and wipes it on exit. */
+  ephemeralRemote: z.boolean().optional(),
 });
 export type SpawnSessionPayload = z.infer<typeof SpawnSessionPayloadSchema>;
 

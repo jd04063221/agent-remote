@@ -40,6 +40,7 @@ export class AcpRemoteSession extends EventEmitter {
   private stdoutBuf = "";
   private remoteSessionId?: string;
   private supportsLoadSession = false;
+  private supportsResumeSession = false;
   private loadingHistory = false;
   private turnEmittedUsage = false;
   private readonly pending = new Map<
@@ -79,8 +80,23 @@ export class AcpRemoteSession extends EventEmitter {
       },
       clientInfo: { name: "agent-remote", version: "0.1.0" },
     })) as Record<string, unknown>;
-    const caps = res.agentCapabilities as { loadSession?: boolean } | undefined;
-    this.supportsLoadSession = caps?.loadSession === true;
+    const caps = res.agentCapabilities as
+      | {
+          loadSession?: boolean;
+          load_session?: boolean;
+          sessionCapabilities?: { resume?: unknown; load?: unknown };
+          session_capabilities?: { resume?: unknown; load?: unknown };
+        }
+      | undefined;
+    this.supportsLoadSession = Boolean(
+      caps?.loadSession === true ||
+        caps?.load_session === true ||
+        caps?.sessionCapabilities?.load ||
+        caps?.session_capabilities?.load,
+    );
+    this.supportsResumeSession = Boolean(
+      caps?.sessionCapabilities?.resume || caps?.session_capabilities?.resume,
+    );
     return res;
   }
 
@@ -126,40 +142,67 @@ export class AcpRemoteSession extends EventEmitter {
   }
 
   /**
-   * Attempts native ACP `session/load` when the remote agent advertises `loadSession: true`
-   * and a prior `resumeSessionId` is provided; gracefully falls back to `session/new`.
-   * Replayed history chunks during `session/load` are suppressed to avoid duplicating local SQLite records.
+   * Attempts native ACP `session/resume` first (when advertised — avoids replaying history chunks),
+   * then `session/load` (suppressing replayed chunks to avoid duplicating local SQLite records);
+   * gracefully falls back to `session/new` only when neither succeeds.
    */
   async resumeOrStartSession(options?: {
     resumeSessionId?: string;
     systemPromptAppend?: string;
     extraMcpServers?: Array<Record<string, unknown>>;
   }): Promise<{ result: AgySessionNewResult; resumed: boolean }> {
-    if (options?.resumeSessionId && this.supportsLoadSession) {
-      this.loadingHistory = true;
-      try {
-        const mcpServers = this.buildMcpServers(options.extraMcpServers);
-        const res = (await this.request(
-          "session/load",
-          {
-            sessionId: options.resumeSessionId,
-            cwd: this.channel.workdir,
-            mcpServers,
-          },
-          30_000,
-        )) as Partial<AgySessionNewResult> | null;
-        this.remoteSessionId = res?.sessionId ?? options.resumeSessionId;
-        return {
-          result: {
-            ...(res ?? {}),
-            sessionId: this.remoteSessionId,
-          } as AgySessionNewResult,
-          resumed: true,
-        };
-      } catch {
-        // Fall back cleanly to creating a fresh remote session
-      } finally {
-        this.loadingHistory = false;
+    if (options?.resumeSessionId) {
+      const mcpServers = this.buildMcpServers(options.extraMcpServers);
+
+      if (this.supportsResumeSession) {
+        try {
+          const res = (await this.request(
+            "session/resume",
+            {
+              sessionId: options.resumeSessionId,
+              cwd: this.channel.workdir,
+              mcpServers,
+            },
+            30_000,
+          )) as Partial<AgySessionNewResult> | null;
+          this.remoteSessionId = res?.sessionId ?? options.resumeSessionId;
+          return {
+            result: {
+              ...(res ?? {}),
+              sessionId: this.remoteSessionId,
+            } as AgySessionNewResult,
+            resumed: true,
+          };
+        } catch {
+          // Fall through to session/load or session/new
+        }
+      }
+
+      if (this.supportsLoadSession) {
+        this.loadingHistory = true;
+        try {
+          const res = (await this.request(
+            "session/load",
+            {
+              sessionId: options.resumeSessionId,
+              cwd: this.channel.workdir,
+              mcpServers,
+            },
+            30_000,
+          )) as Partial<AgySessionNewResult> | null;
+          this.remoteSessionId = res?.sessionId ?? options.resumeSessionId;
+          return {
+            result: {
+              ...(res ?? {}),
+              sessionId: this.remoteSessionId,
+            } as AgySessionNewResult,
+            resumed: true,
+          };
+        } catch {
+          // Fall back cleanly to creating a fresh remote session
+        } finally {
+          this.loadingHistory = false;
+        }
       }
     }
 

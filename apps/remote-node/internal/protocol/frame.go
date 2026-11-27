@@ -102,6 +102,7 @@ type SpawnSessionPayload struct {
 	Env             map[string]string `json:"env,omitempty"`
 	EphemeralFiles  map[string]string `json:"ephemeralFiles,omitempty"`
 	EnableMcpBridge bool              `json:"enableMcpBridge"`
+	EphemeralRemote bool              `json:"ephemeralRemote,omitempty"`
 }
 
 type SessionReadyPayload struct {

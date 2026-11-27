@@ -100,6 +100,7 @@ interface ActiveRuntime {
   localMcpClients: StdioMcpClient[];
   localHttpMcp?: LocalHttpMcpServer;
   pendingHistoryPrefix?: string;
+  lastDelegationGuidance?: string;
   turnReceivedExactUsage: boolean;
   turnEstimatedOutputTokens: number;
 }
@@ -782,9 +783,45 @@ export class AgentRemoteHub {
     }
 
     if (!turn.graceTimer) {
-      turn.graceTimer = setTimeout(forceStop, 1200);
+      // Allow graceful ACP session/cancel enough time (~3.5s) to settle cleanly so the live
+      // remote process & conversation stay intact for the next turn; second click forces immediate stop.
+      turn.graceTimer = setTimeout(forceStop, 3500);
       turn.graceTimer.unref?.();
     }
+  }
+
+  private buildDelegationGuidanceForThread(
+    thread: ThreadRecord,
+    profile: ProfileRecord,
+  ): string | undefined {
+    const blueprints = this.store.listBlueprints();
+    const catalogsByProfile: Record<string, CatalogSnapshot> = {};
+    for (const cat of this.store.listCatalogs()) {
+      catalogsByProfile[cat.profileId] = cat;
+    }
+    const plans = resolveSubagentPlans({
+      parentHostId: thread.hostId,
+      parentProfileId: profile.id,
+      parentAgent: profile.agent,
+      parentModel: thread.model ?? profile.defaultModel,
+      blueprints,
+      overrides: thread.subagentOverrides,
+      catalogsByProfile,
+    });
+    const federated = plans
+      .filter((p) => p.enabled && p.track === "federated")
+      .map((p) => {
+        const targetHost = this.store.getHost(p.hostId);
+        return {
+          blueprint: p.blueprint,
+          targetLabel: `${p.hostId}/${p.profileId}`,
+          model: p.model,
+          effort: p.effort,
+          isLocalHost: targetHost?.transport === "local",
+        };
+      });
+    const text = buildQuotaSaverGuidance(federated, { quotaSaverMode: thread.quotaSaverMode });
+    return text || undefined;
   }
 
   private async runPromptTurn(
@@ -804,11 +841,21 @@ export class AgentRemoteHub {
       rt.turnReceivedExactUsage = false;
       rt.turnEstimatedOutputTokens = 0;
 
-      let effectivePrompt = prompt;
+      const prefixParts: string[] = [];
       if (rt.pendingHistoryPrefix) {
-        effectivePrompt = `${rt.pendingHistoryPrefix}\n\n${prompt}`;
+        prefixParts.push(rt.pendingHistoryPrefix);
         rt.pendingHistoryPrefix = undefined;
       }
+      const latestProfile = this.store.getProfile(thread.profileId);
+      if (latestProfile) {
+        const liveGuidance = this.buildDelegationGuidanceForThread(thread, latestProfile);
+        if (liveGuidance && liveGuidance !== rt.lastDelegationGuidance) {
+          prefixParts.push(liveGuidance);
+          rt.lastDelegationGuidance = liveGuidance;
+        }
+      }
+      const effectivePrompt =
+        prefixParts.length > 0 ? `${prefixParts.join("\n\n")}\n\n${prompt}` : prompt;
 
       const resolvedTurn = this.resolveModelAndEffortForProfile(
         thread.hostId,
@@ -1002,18 +1049,7 @@ export class AgentRemoteHub {
         this.executeFederatedSubagent(this.store.getThread(thread.id) ?? thread, call),
     });
 
-    const quotaPrompt = thread.quotaSaverMode
-      ? buildQuotaSaverGuidance(
-          plans
-            .filter((p) => p.enabled && p.track === "federated")
-            .map((p) => ({
-              blueprint: p.blueprint,
-              targetLabel: `${p.hostId}/${p.profileId}`,
-              model: p.model,
-              effort: p.effort,
-            })),
-        )
-      : undefined;
+    const initialDelegationGuidance = this.buildDelegationGuidanceForThread(thread, profile);
 
     // Collect prior locally stored conversation history (excluding the just-appended current user_message)
     const storedEvents = this.store.listEvents(thread.id);
@@ -1023,13 +1059,21 @@ export class AgentRemoteHub {
         : storedEvents;
     const localHistoryContext = formatLocalHistoryContext(priorEvents);
 
+    const supportsSystemPromptAppend =
+      profile.agent === "antigravity" ||
+      profile.agent === "claude" ||
+      profile.agent === "codex" ||
+      profile.agent === "kiro";
     const willAttemptNativeResume = Boolean(thread.remoteSessionId && !thread.ephemeralRemote);
-    const combinedExtraPrompt = [
-      quotaPrompt,
-      !willAttemptNativeResume && localHistoryContext ? localHistoryContext : undefined,
-    ]
-      .filter(Boolean)
-      .join("\n\n") || undefined;
+    const historyDeliveredInSystemPrompt =
+      supportsSystemPromptAppend && !willAttemptNativeResume && Boolean(localHistoryContext);
+    const combinedExtraPrompt =
+      [
+        initialDelegationGuidance,
+        historyDeliveredInSystemPrompt ? localHistoryContext : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n") || undefined;
 
     // Mount configured local stdio MCP servers ([local_mcp.*]) under Policy Gate
     const localMcpConfigs = Object.entries(this.config.local_mcp).map(([name, m]) => ({
@@ -1145,11 +1189,18 @@ export class AgentRemoteHub {
       this.broadcast({ type: "quota_updated", payload: snap });
     });
 
-    // If native remote resume was attempted but declined/unavailable, inject restored local history once
+    // Whenever a fresh remote session starts with prior local turns and history wasn't already
+    // delivered via systemPromptAppend/developerInstructions (e.g. OpenCode/Gemini/Droid, or native
+    // resume fallback), prepend the restored local transcript once on the first user turn.
     const pendingHistoryPrefix =
-      willAttemptNativeResume && !driver.resumedRemote && localHistoryContext
+      !driver.resumedRemote && !historyDeliveredInSystemPrompt && localHistoryContext
         ? localHistoryContext
         : undefined;
+
+    // Only mark delegation guidance as already delivered when the agent consumed systemPromptAppend /
+    // developerInstructions on a fresh session; otherwise runPromptTurn will prepend it once automatically.
+    const guidanceDeliveredInSystemPrompt =
+      !driver.resumedRemote && Boolean(initialDelegationGuidance) && supportsSystemPromptAppend;
 
     const rt: ActiveRuntime = {
       threadId: thread.id,
@@ -1163,6 +1214,9 @@ export class AgentRemoteHub {
       localMcpClients,
       localHttpMcp: spawned.localHttpMcp,
       pendingHistoryPrefix,
+      lastDelegationGuidance: guidanceDeliveredInSystemPrompt
+        ? initialDelegationGuidance
+        : undefined,
       turnReceivedExactUsage: false,
       turnEstimatedOutputTokens: 0,
     };
@@ -1210,6 +1264,13 @@ export class AgentRemoteHub {
     }
 
     this.runtimes.set(thread.id, rt);
+    // Evict runtime if the underlying remote/local CLI process exits unexpectedly so the next turn
+    // cleanly respawns and resumes (or restores local history) instead of writing to a dead channel.
+    channel.on("exit", () => {
+      if (this.runtimes.get(thread.id) === rt) {
+        this.runtimes.delete(thread.id);
+      }
+    });
     return rt;
   }
 
@@ -1315,7 +1376,9 @@ export class AgentRemoteHub {
       localGitBranch: parentThread.branch,
       model: resolvedChild.model,
       effort: resolvedChild.effort,
-      ephemeralRemote: parentThread.ephemeralRemote,
+      // Federated subagents are disposable one-shot workers: always isolate ephemerally so they never
+      // pollute the remote or local agent's conversation history list.
+      ephemeralRemote: true,
       pureInferenceOnly: call.pureInferenceOnly,
       nativePlans: [],
     });
@@ -1363,7 +1426,7 @@ export class AgentRemoteHub {
         toolEngine: childEngine,
         model: resolvedChild.model,
         effort: resolvedChild.effort,
-        ephemeralRemote: parentThread.ephemeralRemote,
+        ephemeralRemote: true,
         systemPromptAppend: built.systemPromptAppend,
         developerInstructions: built.developerInstructions,
       });
@@ -1603,9 +1666,11 @@ export class AgentRemoteHub {
       return {
         channel: new LocalProcessChannel({
           sessionId: spec.sessionId,
+          agent: spec.agent,
           command: spec.command,
           args: spec.args,
           env: spec.env,
+          ephemeralRemote: spec.ephemeralRemote,
           mcpEndpointUrl: mcpUrl,
           mcpBearerToken: mcpToken,
         }),

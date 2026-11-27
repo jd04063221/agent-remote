@@ -125,22 +125,36 @@ export function buildQuotaSaverGuidance(
     targetLabel: string;
     model?: string;
     effort?: ThinkingEffort;
+    isLocalHost?: boolean;
   }>,
+  options?: { quotaSaverMode?: boolean },
 ): string {
   if (subagents.length === 0) return "";
+  const quotaSaver = options?.quotaSaverMode ?? true;
+  const explorerName =
+    subagents.find((s) => s.blueprint.name === "explorer")?.blueprint.name ??
+    subagents[0]!.blueprint.name;
   const lines = [
-    "[agent-remote: Quota-Saver Offloading Policy]",
-    "To preserve primary model quota and keep your context window concise:",
-    "1. Offload broad repository exploration, multi-file reading, boilerplate/unit-test writing, and long log summarization to the federated subagents below via `dispatch_subagent` or `call_remote_model`.",
-    "2. Ask subagents to return concise, structured summaries rather than raw file dumps.",
-    "3. Reserve primary turns for planning, architectural reasoning, integration, and final review.",
+    quotaSaver
+      ? "[agent-remote: Local Subagent Capabilities & Quota-Saver Offloading Policy]"
+      : "[agent-remote: Available Local & Federated Subagents]",
+    "You have access to the `dispatch_subagent` MCP tool (under `agent_remote_local`), which spawns specialized worker agents that execute directly against the user's LOCAL workspace (`read_file`, `list_dir`, `glob`, `grep`, and for non-read-only subagents `edit_file`/`write_file`/`run_command`).",
+    quotaSaver
+      ? `MANDATORY DELEGATION RULE (Quota-Saver ON): Whenever a task requires traversing directories, scanning/auditing the repository, searching across multiple files, summarizing project structure, or writing scoped boilerplate/tests, you MUST invoke \`dispatch_subagent\` (e.g. \`{"subagent":"${explorerName}","task":"..."}\`) FIRST instead of repeatedly calling \`list_dir\`/\`glob\`/\`grep\`/\`read_file\` yourself.`
+      : `DELEGATION GUIDANCE: For broad repository traversal, multi-file exploration, or scoped parallel edits/tests, prefer delegating to \`dispatch_subagent\` (e.g. \`{"subagent":"${explorerName}","task":"..."}\`) to keep your main context clean and fast.`,
+    "Ask subagents to return concise, structured findings with exact file paths and line numbers rather than dumping entire files.",
+    "Reserve direct single-file reads and primary turns for architecture, final synthesis, and verification.",
     "",
-    "Available federated subagents for this task:",
+    "Active federated subagents available via `dispatch_subagent`:",
     ...subagents.map((s) => {
-      const spec = [s.targetLabel, s.model, s.effort ? `effort=${s.effort}` : undefined]
+      const spec = [
+        s.isLocalHost ? `LOCAL worker (${s.targetLabel})` : s.targetLabel,
+        s.model,
+        s.effort ? `effort=${s.effort}` : undefined,
+      ]
         .filter(Boolean)
         .join(" | ");
-      return `- \`${s.blueprint.name}\` (${spec}): ${s.blueprint.description}`;
+      return `- \`${s.blueprint.name}\` [${spec}]: ${s.blueprint.description}`;
     }),
   ];
   return lines.join("\n");
@@ -153,9 +167,9 @@ export function buildQuotaSaverGuidance(
  */
 export function formatLocalHistoryContext(
   events: Array<{ kind: string; payload: Record<string, unknown> }>,
-  maxChars = 12_000,
+  maxChars = 24_000,
 ): string {
-  const turns: Array<{ role: "user" | "assistant"; text: string }> = [];
+  const turns: Array<{ role: "user" | "assistant" | "subagent"; label?: string; text: string }> = [];
 
   for (const ev of events) {
     if (ev.kind === "user_message" && typeof ev.payload.text === "string" && ev.payload.text.trim()) {
@@ -166,6 +180,18 @@ export function formatLocalHistoryContext(
         last.text += ev.payload.text;
       } else {
         turns.push({ role: "assistant", text: ev.payload.text });
+      }
+    } else if (ev.kind === "subagent_completed" && ev.payload.ok === true) {
+      const name = typeof ev.payload.subagentName === "string" ? ev.payload.subagentName : "subagent";
+      const summaryRaw =
+        typeof ev.payload.text === "string" && ev.payload.text.trim()
+          ? ev.payload.text.trim()
+          : typeof ev.payload.preview === "string"
+            ? ev.payload.preview.trim()
+            : "";
+      if (summaryRaw) {
+        const clipped = summaryRaw.length > 1200 ? `${summaryRaw.slice(0, 1200)}...` : summaryRaw;
+        turns.push({ role: "subagent", label: name, text: clipped });
       }
     }
   }
@@ -178,7 +204,12 @@ export function formatLocalHistoryContext(
     const t = turns[i]!;
     const clean = t.text.trim();
     if (!clean) continue;
-    const prefix = t.role === "user" ? "User: " : "Assistant: ";
+    const prefix =
+      t.role === "user"
+        ? "User: "
+        : t.role === "subagent"
+          ? `Subagent(${t.label ?? "worker"}): `
+          : "Assistant: ";
     const entry = `${prefix}${clean}`;
     if (used + entry.length > maxChars && rendered.length > 0) break;
     rendered.unshift(entry.slice(0, maxChars));

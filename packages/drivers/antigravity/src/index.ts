@@ -7,6 +7,7 @@ export interface AgyLaunchOptions {
   localGitBranch?: string;
   quotaSaverPrompt?: string;
   enableMcpBridge?: boolean;
+  ephemeralRemote?: boolean;
 }
 
 /**
@@ -17,12 +18,15 @@ export function buildAntigravitySpawnSpec(options: AgyLaunchOptions): {
   systemPromptAppend: string;
 } {
   const localEnvPrompt = [
-    "[agent-remote: Split-Plane Execution Environment]",
+    "[agent-remote: Split-Plane Execution Environment & Local Capabilities]",
     `Your workspace files and shell live on the user's LOCAL machine (${describeLocalRuntimeEnv()}), NOT on this remote server.`,
     `Local workspace root: ${options.localWorkspaceRoot}`,
     options.localGitBranch ? `Current git branch: ${options.localGitBranch}` : undefined,
     "CRITICAL RULE: Do NOT inspect or modify files on the remote server filesystem.",
-    "ALWAYS use the `agent_remote_local` MCP tools (`read_file`, `edit_file`, `write_file`, `delete_file`, `list_dir`, `glob`, `grep`, `run_command`) to read/edit code and run commands on the user's local machine.",
+    "Local capabilities exposed through the `agent_remote_local` MCP server:",
+    "- Direct local workspace tools: `read_file`, `edit_file`, `write_file`, `delete_file`, `list_dir`, `glob`, `grep`, `run_command` (plus any mounted `local_mcp__*` tools).",
+    "- Federated subagent delegation: `dispatch_subagent` (and `call_remote_model`) can delegate repository traversal, multi-file reading/searching, log analysis, and scoped code edits directly to fast worker agents (including agents running locally on the user's machine with zero remote-hop latency).",
+    "ALWAYS use `agent_remote_local` MCP tools — and prefer `dispatch_subagent` for multi-file codebase traversal/exploration when subagents are listed below.",
     options.quotaSaverPrompt ? `\n${options.quotaSaverPrompt}` : undefined,
   ]
     .filter(Boolean)
@@ -37,6 +41,7 @@ export function buildAntigravitySpawnSpec(options: AgyLaunchOptions): {
       env: {},
       ephemeralFiles: {},
       enableMcpBridge: options.enableMcpBridge ?? true,
+      ephemeralRemote: options.ephemeralRemote,
     },
     systemPromptAppend: localEnvPrompt,
   };
