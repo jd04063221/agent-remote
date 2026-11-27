@@ -509,6 +509,7 @@ export function App() {
 
   const handleSendPrompt = async () => {
     if (!activeThread || !promptText.trim()) return;
+    if (activeThread.status === "running" || activeThread.status === "waiting_approval") return;
     const text = promptText;
     setPromptText("");
     try {
@@ -697,9 +698,15 @@ export function App() {
   };
 
   const events = activeThreadId ? (eventsByThread[activeThreadId] ?? []) : [];
+  const feedRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = feedRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distFromBottom < 140) {
+      chatEndRef.current?.scrollIntoView({ behavior: "auto" });
+    }
   }, [events.length]);
 
   // Collapse consecutive text_delta / thought_delta chunks and merge subagent_started + subagent_completed by childId
@@ -1143,7 +1150,7 @@ export function App() {
             </header>
 
             <div className={compareThreadId ? "split-feed-grid" : "single-feed-wrap"}>
-            <div className="feed">
+            <div className="feed" ref={feedRef}>
               {renderedFeed.map((b) => {
                 if (b.kind === "user_message") {
                   return (

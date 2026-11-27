@@ -3,7 +3,7 @@ export type TableAlign = "left" | "center" | "right" | null;
 export type MdInline =
   | { type: "text"; text: string }
   | { type: "br" }
-  | { type: "code"; text: string }
+  | { type: "code"; text: string; title?: string }
   | { type: "strong"; children: MdInline[] }
   | { type: "em"; children: MdInline[] }
   | { type: "del"; children: MdInline[] }
@@ -44,6 +44,15 @@ export function isSafeUrl(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return false;
   return SAFE_URL_RE.test(trimmed);
+}
+
+function decodeFileUri(uri: string): string {
+  const stripped = uri.replace(/^file:\/\//i, "");
+  try {
+    return decodeURIComponent(stripped);
+  } catch {
+    return stripped;
+  }
 }
 
 function isWhitespace(ch: string | undefined): boolean {
@@ -658,8 +667,16 @@ export function parseInline(text: string): MdInline[] {
             href: link.href,
             children: labelNodes.length > 0 ? labelNodes : [{ type: "text", text: link.href }],
           });
+        } else if (/^file:\/\//i.test(link.href.trim())) {
+          // Safe, readable badge for local file:// citations emitted by agents (e.g. [App.tsx](file:///.../App.tsx#L10))
+          const cleanPath = decodeFileUri(link.href.trim());
+          nodes.push({
+            type: "code",
+            text: link.label.trim() || cleanPath,
+            title: cleanPath,
+          });
         } else {
-          // Safe fallback for non-http(s) URLs (e.g. file:// or blocked javascript:)
+          // Safe fallback for blocked schemes (e.g. javascript:, data:)
           for (const n of labelNodes) nodes.push(n);
         }
         i = link.end;

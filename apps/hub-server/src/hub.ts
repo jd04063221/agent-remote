@@ -648,9 +648,10 @@ export class AgentRemoteHub {
     thread.updatedAt = new Date().toISOString();
     this.store.upsertThread(thread);
 
-    // If a prior turn is somehow still running on this thread, cancel it before starting a new turn
+    // If a prior turn is somehow still running on this thread, force-stop it cleanly before starting a new turn
+    // so two prompts never race on the same ACP process and no stale graceTimer can tear down the new turn.
     if (this.activeTurns.has(threadId)) {
-      this.cancelThread(threadId);
+      this.cancelThread(threadId, true);
     }
 
     const turn: ActiveTurn = {
@@ -718,7 +719,7 @@ export class AgentRemoteHub {
     void rt.localHttpMcp?.close().catch(() => {});
   }
 
-  cancelThread(threadId: string): void {
+  cancelThread(threadId: string, immediateForce = false): void {
     const turn = this.activeTurns.get(threadId);
     const rt = this.runtimes.get(threadId);
 
@@ -770,14 +771,15 @@ export class AgentRemoteHub {
         clearTimeout(turn.graceTimer);
         turn.graceTimer = undefined;
       }
-      // If the remote ACP/CLI process ignored session/cancel, kill its channel so the turn unblocks immediately;
-      // local SQLite + remoteSessionId seamlessly restore context on the next prompt.
-      this.teardownRuntime(threadId);
+      // Guard against stale grace timers ever tearing down a newer turn's runtime
+      if (this.activeTurns.get(threadId) === turn) {
+        this.teardownRuntime(threadId);
+      }
       turn.forceFinish?.();
     };
 
-    if (alreadyCancelling) {
-      // Second click on Cancel triggers immediate hard stop without waiting for grace period
+    if (alreadyCancelling || immediateForce) {
+      // Second click on Cancel (or programmatic preemption) triggers immediate hard stop
       forceStop();
       return;
     }

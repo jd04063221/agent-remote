@@ -823,19 +823,49 @@ func applyEphemeralIsolation(agent, resolvedCmd, workdir string, args []string) 
 		return outArgs, envOverrides
 
 	case "opencode":
-		srcBase := filepath.Join(home, ".local", "share", "opencode")
+		candidates := make([]string, 0, 4)
 		if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
-			srcBase = filepath.Join(xdg, "opencode")
+			candidates = append(candidates, filepath.Join(xdg, "opencode"))
+		}
+		candidates = append(candidates, filepath.Join(home, ".local", "share", "opencode"))
+		if localApp := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localApp != "" {
+			candidates = append(candidates, filepath.Join(localApp, "opencode"))
+		}
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			candidates = append(candidates, filepath.Join(appData, "opencode"))
+		}
+		srcBase := ""
+		hadRealAuth := false
+		for _, c := range candidates {
+			if _, err := os.Stat(filepath.Join(c, "auth.json")); err == nil {
+				srcBase = c
+				hadRealAuth = true
+				break
+			}
+		}
+		if srcBase == "" {
+			for _, c := range candidates {
+				if info, err := os.Stat(c); err == nil && info.IsDir() {
+					srcBase = c
+					break
+				}
+			}
 		}
 		ephemXdg := filepath.Join(workdir, ".ephem-xdg-data")
 		ephemOpenCode := filepath.Join(ephemXdg, "opencode")
 		if err := os.MkdirAll(ephemOpenCode, 0o700); err != nil {
 			return args, envOverrides
 		}
-		for _, entry := range []string{"auth.json", "mcp-auth.json"} {
-			linkOrCopyFile(filepath.Join(srcBase, entry), filepath.Join(ephemOpenCode, entry))
+		if srcBase != "" {
+			for _, entry := range []string{"auth.json", "mcp-auth.json"} {
+				linkOrCopyFile(filepath.Join(srcBase, entry), filepath.Join(ephemOpenCode, entry))
+			}
 		}
-		envOverrides["XDG_DATA_HOME"] = ephemXdg
+		if !hadRealAuth {
+			envOverrides["XDG_DATA_HOME"] = ephemXdg
+		} else if _, err := os.Stat(filepath.Join(ephemOpenCode, "auth.json")); err == nil {
+			envOverrides["XDG_DATA_HOME"] = ephemXdg
+		}
 		return args, envOverrides
 	}
 

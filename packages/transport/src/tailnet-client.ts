@@ -96,11 +96,15 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
   lastAckSeq = 0;
 
   private readonly sendFrame: (frame: MuxFrame) => void;
+  private readonly sendReliableFrame: (frame: MuxFrame) => Promise<void>;
+  private readonly onKill: (ch: ManagedChannel) => void;
   private mcpHandler?: (req: McpRpcReqPayload) => Promise<McpRpcResPayload>;
 
   constructor(
     ready: SessionReadyPayload,
     sendFrame: (frame: MuxFrame) => void,
+    sendReliableFrame: (frame: MuxFrame) => Promise<void>,
+    onKill: (ch: ManagedChannel) => void,
   ) {
     super();
     this.sessionId = ready.sessionId;
@@ -109,6 +113,8 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
     this.mcpEndpointUrl = ready.mcpEndpointUrl;
     this.mcpBearerToken = ready.mcpBearerToken;
     this.sendFrame = sendFrame;
+    this.sendReliableFrame = sendReliableFrame;
+    this.onKill = onKill;
   }
 
   writeStdin(data: string): void {
@@ -120,10 +126,15 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
   }
 
   kill(): void {
-    this.sendFrame({
-      ch: this.channel,
-      type: "session_kill",
-    });
+    this.onKill(this);
+    try {
+      this.sendFrame({
+        ch: this.channel,
+        type: "session_kill",
+      });
+    } catch {
+      // WSS already disconnected; local tracking has been cleaned up
+    }
   }
 
   setMcpHandler(handler: (req: McpRpcReqPayload) => Promise<McpRpcResPayload>): void {
@@ -132,7 +143,7 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
 
   async handleMcpReq(req: McpRpcReqPayload): Promise<void> {
     if (!this.mcpHandler) {
-      this.sendFrame({
+      await this.sendReliableFrame({
         ch: this.channel,
         type: "mcp_rpc_res",
         payload: {
@@ -141,18 +152,18 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ error: "No local MCP handler attached" }),
         } satisfies McpRpcResPayload,
-      });
+      }).catch(() => {});
       return;
     }
     try {
       const res = await this.mcpHandler(req);
-      this.sendFrame({
+      await this.sendReliableFrame({
         ch: this.channel,
         type: "mcp_rpc_res",
         payload: res,
-      });
+      }).catch(() => {});
     } catch (err) {
-      this.sendFrame({
+      await this.sendReliableFrame({
         ch: this.channel,
         type: "mcp_rpc_res",
         payload: {
@@ -161,7 +172,7 @@ class ManagedChannel extends EventEmitter implements RemoteSessionChannel {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ error: (err as Error).message }),
         } satisfies McpRpcResPayload,
-      });
+      }).catch(() => {});
     }
   }
 }
@@ -358,6 +369,8 @@ export class TailnetDirectClient extends EventEmitter {
       this.reconnectTimer = undefined;
     }
     this.rejectPending(new Error("Client closed"));
+    this.channelsBySession.clear();
+    this.channelsById.clear();
     if (this.ws) {
       try {
         if (this.ws.readyState === WebSocket.CONNECTING) {
@@ -444,10 +457,41 @@ export class TailnetDirectClient extends EventEmitter {
       payload: spec,
     });
     const ready = frame.payload as SessionReadyPayload;
-    const ch = new ManagedChannel(ready, (f) => this.sendRaw(f));
+    const ch = new ManagedChannel(
+      ready,
+      (f) => this.sendRaw(f),
+      (f) => this.sendReliable(f),
+      (killed) => {
+        this.channelsBySession.delete(killed.sessionId);
+        this.channelsById.delete(killed.channel);
+      },
+    );
     this.channelsBySession.set(ready.sessionId, ch);
     this.channelsById.set(ready.channel, ch);
     return ch;
+  }
+
+  private async sendReliable(frame: MuxFrame, waitMs = 12_000): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendRaw(frame);
+      return;
+    }
+    if (this.closedByUser) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.off("connected", onReconnect);
+        reject(new Error("Timed out waiting for Tailnet WSS reconnect"));
+      }, waitMs);
+      timer.unref?.();
+      const onReconnect = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.once("connected", onReconnect);
+    });
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendRaw(frame);
+    }
   }
 
   private async resumeAllSessions(): Promise<void> {

@@ -103,10 +103,12 @@ describe("Markdown parser and React renderer", () => {
     expect(isSafeUrl("data:text/html,<script>alert(1)</script>")).toBe(false);
 
     const html = renderMd(
-      '[安全链接](https://example.com) [恶意](javascript:alert(1)) <script>alert("xss")</script>',
+      '[安全链接](https://example.com) [App.tsx](file:///C:/repo/App.tsx#L12) [恶意](javascript:alert(1)) <script>alert("xss")</script>',
     );
     expect(html).toContain('href="https://example.com"');
     expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain('<code class="md-inline-code" title="/C:/repo/App.tsx#L12">App.tsx</code>');
+    expect(html).not.toContain("file://");
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");

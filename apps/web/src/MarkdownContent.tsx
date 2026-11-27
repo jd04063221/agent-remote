@@ -61,7 +61,7 @@ function renderInlines(nodes: MdInline[], keyPrefix: string): React.ReactNode[] 
         return <br key={key} />;
       case "code":
         return (
-          <code key={key} className="md-inline-code">
+          <code key={key} className="md-inline-code" title={node.title}>
             {node.text}
           </code>
         );

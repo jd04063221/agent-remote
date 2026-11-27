@@ -135,17 +135,33 @@ function applyLocalEphemeralIsolation(
   if (!home) return;
 
   if (agent === "opencode") {
-    const srcBase = process.env.XDG_DATA_HOME?.trim()
-      ? path.join(process.env.XDG_DATA_HOME.trim(), "opencode")
-      : path.join(home, ".local", "share", "opencode");
+    const candidates = [
+      process.env.XDG_DATA_HOME?.trim()
+        ? path.join(process.env.XDG_DATA_HOME.trim(), "opencode")
+        : "",
+      path.join(home, ".local", "share", "opencode"),
+      process.env.LOCALAPPDATA?.trim()
+        ? path.join(process.env.LOCALAPPDATA.trim(), "opencode")
+        : "",
+      process.env.APPDATA?.trim() ? path.join(process.env.APPDATA.trim(), "opencode") : "",
+    ].filter(Boolean);
+    const srcBase =
+      candidates.find((c) => fs.existsSync(path.join(c, "auth.json"))) ??
+      candidates.find((c) => fs.existsSync(c));
+    const hadRealAuth = Boolean(srcBase && fs.existsSync(path.join(srcBase, "auth.json")));
     const ephemXdg = path.join(workdir, ".ephem-xdg-data");
     const ephemOpenCode = path.join(ephemXdg, "opencode");
     try {
       fs.mkdirSync(ephemOpenCode, { recursive: true });
-      for (const name of ["auth.json", "mcp-auth.json"]) {
-        linkOrCopyEntry(path.join(srcBase, name), path.join(ephemOpenCode, name));
+      if (srcBase) {
+        for (const name of ["auth.json", "mcp-auth.json"]) {
+          linkOrCopyEntry(path.join(srcBase, name), path.join(ephemOpenCode, name));
+        }
       }
-      env.XDG_DATA_HOME = ephemXdg;
+      // Safety guard: never break user auth if real auth.json existed but could not be linked/copied
+      if (!hadRealAuth || fs.existsSync(path.join(ephemOpenCode, "auth.json"))) {
+        env.XDG_DATA_HOME = ephemXdg;
+      }
     } catch {
       // ignore isolation failure and fall back cleanly
     }
