@@ -1,11 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app, BrowserWindow, Notification } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeImage,
+  Notification,
+  shell,
+  Tray,
+  type NativeImage,
+} from "electron";
 import { AgentRemoteHub } from "@agent-remote/hub-server";
-
-let hub: AgentRemoteHub | undefined;
-let mainWindow: BrowserWindow | undefined;
+import { createDesktopLifecycle } from "./tray-controller.js";
 
 function resolveWebDistDir(): string {
   const packagedWeb = path.join(process.resourcesPath ?? "", "web");
@@ -15,61 +22,74 @@ function resolveWebDistDir(): string {
   return path.resolve(import.meta.dirname, "../../web/dist");
 }
 
-async function createWindow(): Promise<void> {
-  if (!process.env.AGENT_REMOTE_VERSION && app.getVersion()) {
-    process.env.AGENT_REMOTE_VERSION = app.getVersion();
-  }
-  const dbPath =
-    process.env.AGENT_REMOTE_DB ??
-    path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
-  const webDistDir = resolveWebDistDir();
-  const port = Number(process.env.AGENT_REMOTE_PORT ?? 3775);
-
-  hub = new AgentRemoteHub({ dbPath, webDistDir });
-  const started = await hub.listen(port, "127.0.0.1");
-
-  const ver = process.env.AGENT_REMOTE_VERSION || app.getVersion();
-  mainWindow = new BrowserWindow({
-    width: 1460,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 680,
-    title: ver ? `agent-remote v${ver} — Multi-Agent Control Workbench` : "agent-remote — Multi-Agent Control Workbench",
-    backgroundColor: "#0c0f14",
-    webPreferences: {
-      preload: path.resolve(import.meta.dirname, "./preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  await mainWindow.loadURL(started.url);
-
-  if (Notification.isSupported()) {
-    new Notification({
-      title: "agent-remote Ready",
-      body: `Local Hub running at ${started.url}`,
-    }).show();
-  }
+function resolveAssetsDir(): string {
+  return path.resolve(import.meta.dirname, "../assets");
 }
 
-void app.whenReady().then(() => {
-  void createWindow();
+if (!process.env.AGENT_REMOTE_VERSION && app.getVersion()) {
+  process.env.AGENT_REMOTE_VERSION = app.getVersion();
+}
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+const lifecycle = createDesktopLifecycle({
+  platform: process.platform,
+  assetsDir: resolveAssetsDir(),
+  version: process.env.AGENT_REMOTE_VERSION || app.getVersion(),
+  app,
+  async startHub() {
+    const dbPath =
+      process.env.AGENT_REMOTE_DB ??
+      path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
+    const webDistDir = resolveWebDistDir();
+    const port = Number(process.env.AGENT_REMOTE_PORT ?? 3775);
+
+    const hub = new AgentRemoteHub({ dbPath, webDistDir });
+    const started = await hub.listen(port, "127.0.0.1");
+    return {
+      url: started.url,
+      close: () => hub.close(),
+    };
+  },
+  createBrowserWindow({ title, icon }) {
+    return new BrowserWindow({
+      width: 1460,
+      height: 920,
+      minWidth: 1080,
+      minHeight: 680,
+      title,
+      icon: icon as NativeImage | undefined,
+      backgroundColor: "#0c0f14",
+      webPreferences: {
+        preload: path.resolve(import.meta.dirname, "./preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+  },
+  createTray(icon) {
+    return new Tray(icon as NativeImage);
+  },
+  buildMenu(template) {
+    return Menu.buildFromTemplate(template);
+  },
+  loadNativeImageFromPath(filePath) {
+    return nativeImage.createFromPath(filePath);
+  },
+  loadNativeImageFromBuffer(buffer) {
+    return nativeImage.createFromBuffer(buffer);
+  },
+  openExternal(url) {
+    return shell.openExternal(url);
+  },
+  notify({ title, body }) {
+    if (Notification.isSupported()) {
+      new Notification({ title, body }).show();
     }
-  });
+  },
+  logger: console,
 });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+process.on("SIGINT", () => lifecycle.requestQuit());
+process.on("SIGTERM", () => lifecycle.requestQuit());
 
-app.on("before-quit", () => {
-  void hub?.close();
-});
+lifecycle.start();

@@ -136,6 +136,8 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
           '
           cp -r apps/web/dist desktop-stage/web/dist
+          rm -rf desktop-stage/desktop/assets
+          cp -r apps/desktop/assets desktop-stage/desktop/assets
           cp -r apps/desktop/cli-bin desktop-stage/desktop/cli-bin
           cp -r apps/desktop/packaging desktop-stage/desktop/packaging
           chmod +x desktop-stage/desktop/cli-bin/ar desktop-stage/desktop/cli-bin/agent-remote desktop-stage/desktop/packaging/*.sh

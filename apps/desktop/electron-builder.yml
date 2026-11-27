@@ -6,6 +6,7 @@ directories:
   output: release
 files:
   - dist/**/*
+  - assets/**/*
   - node_modules/**/*
   - package.json
 extraResources:
@@ -14,6 +15,7 @@ extraResources:
   - from: cli-bin
     to: bin
 mac:
+  icon: assets/icon.icns
   category: public.app-category.developer-tools
   identity: "-"
   hardenedRuntime: false
@@ -29,6 +31,7 @@ mac:
         - arm64
         - x64
 win:
+  icon: assets/icon.ico
   artifactName: "agent-remote-${version}-windows-${arch}-portable.${ext}"
   target:
     - target: nsis
@@ -38,6 +41,7 @@ win:
       arch:
         - x64
 linux:
+  icon: assets/icon.png
   category: Development
   maintainer: "agent-remote <noreply@users.noreply.github.com>"
   artifactName: "agent-remote-${version}-linux-${arch}.${ext}"
