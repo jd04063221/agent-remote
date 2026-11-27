@@ -4,6 +4,30 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.1.5] - 2026-11-27
+
+### 新增（Added）
+- **跨平台桌面端系统托盘 / 状态栏驻留与自定义图标**：
+  - Windows / macOS / Linux 点击窗口关闭（`×` / `Alt+F4` / `Cmd+W`）默认隐藏进入系统托盘 / 顶部状态栏，本地 Hub 与远端任务持续后台运行；完全退出需右键点击托盘图标选择「退出 agent-remote」（macOS 同步支持标准 `Cmd+Q` 与原生全屏安全退出后再隐藏，极简无托盘桌面自动安全降级）。
+  - 新增桌面单实例防重开锁（窗口在托盘隐藏时再次启动自动唤醒已有窗口，不再冲突端口 `3775`）。
+  - 生成并内置全新跨平台应用与托盘图标资产（Windows 多分辨率 `.ico`、macOS `.icns` 及自适应明暗主题的 `Template` 菜单栏图标、Linux `.png`），托盘菜单自动按系统语言切换中/英文。
+- **局域网 / OpenVPN / WireGuard 节点原生认证（Ed25519 公私钥 + 随机 API 密钥）**：
+  - Go 远端节点新增 `--auth-mode pubkey`（读取 `~/.config/agent-remote/authorized_keys` 或 `--authorized-keys`，兼容标准 `ssh-ed25519` 与 `ed25519:` 格式，支持免重启热加载），每次建连现场以 `timestamp + nonce` 做 Ed25519 防重放签名，私钥不离本机，即使走局域网/VPN `ws://` 也无明文泄露风险。
+  - 新增 `--auth-mode token --token` 友好别名（兼容 `dev-token`），Web / 桌面端添加主机弹窗支持**一键生成 Ed25519 密钥对**、导入已有 PKCS#8 / OpenSSH `~/.ssh/id_ed25519` 私钥、**随机生成 256 位 `ar_sk_` API 密钥**，并提供一键复制公钥与远端启动命令；裸局域网/VPN `IP:端口` 地址（如 `192.168.1.50:19420`）自动补全为 `ws://.../v1/ws`。
+
+### 修复（Fixed）
+- **真正零留痕的远端无痕模式（`ephemeralRemote`）与非无痕无缝会话续接**：
+  - Go 远端节点与本地子进程通道按会话隔离 Antigravity（`--gemini-dir <workdir>/.ephem-gemini`）与 OpenCode（隔离 `XDG_DATA_HOME` 并兼容 Windows `%LOCALAPPDATA%` / `%APPDATA%` 登录态保护），会话结束立即销毁临时目录，确保真实 `conversations/` 目录零新增记录；所有联邦子代理默认启用无痕隔离。
+  - 非无痕模式下优先通过 ACP `session/resume`（回退 `session/load`）精确恢复同一远端对话并自动重绑重启后的新 MCP 通道；会话意外断开时自动剔除僵尸 runtime，并增加 3.5s 取消宽限窗口，避免同一任务在远端碎裂为多段对话。
+  - 统一多轮上下文回放（24K 字符窗口 + 子代理结果摘要）与强化 Quota-Saver 本地委派规则提示词，确保远端大脑跨重启记忆连贯且主动通过 `dispatch_subagent` 委派本地代码遍历任务。
+- **彻底解决 Windows 退出后残留 Node/Electron 进程导致重开 GUI 报错的问题**：
+  - `AgentRemoteHub.close()` 与 `LocalHttpMcpServer.close()` 主动调用 `ws.terminate()` 与 `closeAllConnections()` 瞬时释放 HTTP Keep-Alive 连接与端口 `3775`；修复端口被占时 `WebSocketServer` 二次抛出未捕获 `EADDRINUSE` 异常的问题。
+  - 统一清理 Windows 本地/SSH/MCP 子进程管道并 `unref()` `taskkill` 与定时器，为 SQLite 启用 `WAL` + `busy_timeout`，在 Electron 退出阶段加入 `300ms` 零延迟 `unref` 看门狗兜底 `app.exit(0)`，并在端口 `3775` 被外部占用时自动重试并安全回退空闲端口。
+- **深度审计边界修复与界面体验优化**：
+  - 修复并发发送与取消 `graceTimer` 竞态、防止运行中误触 `Ctrl+Enter` 重复发消息；
+  - 修复 Tailnet 客户端 `ManagedChannel.kill()` 通道表泄漏，并为 `handleMcpReq()` 补齐断线重连可靠回包（`sendReliable`）；
+  - Web UI 将 `file://` 文件引用安全渲染为行内代码徽章，消息流仅在接近底部时自动滚底，不再打断向上翻阅历史。
+
 ## [0.1.4] - 2026-11-26
 
 ### 新增（Added）
@@ -85,6 +109,7 @@
 - **多形态前端与共享 SQLite 历史**：提供 Web / Electron 三栏工作台（含分屏对比、审批卡片、Subagent 蓝图编辑）、交互式终端 `ar chat` / `ar threads`、标准 ACP 桥接 `ar acp`、无头执行 `ar exec` 与 `--ephemeral` 远端无痕模式。
 - **零安装 SSH 兜底与配置管理**：支持 SSH / Tailscale SSH 免装节点接入、TOML 配置文件初始化（`ar init`）以及 GitHub Actions CI 与多平台 Release 自动发版流水线。
 
+[0.1.5]: https://github.com/jd04063221/agent-remote/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/jd04063221/agent-remote/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jd04063221/agent-remote/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jd04063221/agent-remote/compare/v0.1.1...v0.1.2
