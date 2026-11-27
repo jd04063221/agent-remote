@@ -167,6 +167,7 @@ class FakeTray extends MockEmitter implements TrayLike {
 interface TestHarness {
   app: AppLike & MockEmitter & {
     quitCalls: number;
+    exitCalls: number[];
     exited: boolean;
     focusCalls: number;
     userModelId?: string;
@@ -207,6 +208,7 @@ function createHarness(options: {
   const appEmitter = new MockEmitter();
   const appObj = Object.assign(appEmitter, {
     quitCalls: 0,
+    exitCalls: [] as number[],
     exited: false,
     focusCalls: 0,
     userModelId: undefined as string | undefined,
@@ -220,6 +222,9 @@ function createHarness(options: {
     whenReady: () => readyPromise,
     focus: () => {
       appObj.focusCalls++;
+    },
+    exit: (code = 0) => {
+      appObj.exitCalls.push(code);
     },
     triggerQuit(): { prevented: boolean } {
       let prevented = false;
@@ -322,6 +327,7 @@ function createHarness(options: {
     },
     logger: { warn: vi.fn() },
     shutdownTimeoutMs: 500,
+    forceExitGraceMs: 25,
   };
 
   return harness;
@@ -408,6 +414,10 @@ describe("desktop tray & close-to-tray lifecycle", () => {
     expect(win.isDestroyed()).toBe(true);
     expect(h.app.exited).toBe(true);
     expect(h.app.quitCalls).toBe(2);
+
+    // Watchdog guarantees app.exit(0) fires if a lingering Windows handle keeps libuv alive.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(h.app.exitCalls).toEqual([0]);
   });
 
   it("macOS: uses Template menu-bar icon, exits fullscreen before hiding, and activate reuses Hub", async () => {

@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import { AgentRemoteHub } from "./hub.js";
 
 const GO_NODE_BIN = path.resolve(
@@ -174,5 +176,48 @@ describe("AgentRemoteHub + Go remote-node live integration", () => {
     };
     expect(afterDel.state.hosts.some((h) => h.id === "edit-vps")).toBe(false);
     expect(afterDel.state.profiles.some((p) => p.id === "edit-prof")).toBe(false);
+  });
+
+  it("closes immediately with open HTTP Keep-Alive & WebSocket clients and releases the port for instant rebind", async () => {
+    const hub1 = new AgentRemoteHub({ dbPath: ":memory:" });
+    const started1 = await hub1.listen(0, "127.0.0.1");
+
+    // 1. Hold an open HTTP/1.1 Keep-Alive connection + open /ws UI socket (simulating Electron renderer)
+    const keepAliveAgent = new http.Agent({ keepAlive: true });
+    await new Promise<void>((resolve, reject) => {
+      const req = http.get(`${started1.url}/api/state`, { agent: keepAliveAgent }, (res) => {
+        res.resume();
+        res.on("end", () => resolve());
+      });
+      req.on("error", reject);
+    });
+
+    const uiWs = new WebSocket(`ws://127.0.0.1:${started1.port}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      uiWs.once("open", () => resolve());
+      uiWs.once("error", reject);
+    });
+
+    // 2. Verify a conflicting listen() on the same port rejects cleanly with EADDRINUSE
+    const conflictHub = new AgentRemoteHub({ dbPath: ":memory:" });
+    await expect(conflictHub.listen(started1.port, "127.0.0.1")).rejects.toMatchObject({
+      code: "EADDRINUSE",
+    });
+    await conflictHub.close();
+
+    // 3. Close hub1: must NOT hang on keep-alive or WS sockets and must free the exact port right away
+    const t0 = Date.now();
+    await hub1.close();
+    const elapsedMs = Date.now() - t0;
+    expect(elapsedMs).toBeLessThan(1000);
+
+    keepAliveAgent.destroy();
+    uiWs.terminate();
+
+    // 4. Immediately rebind the exact same port with a brand-new Hub
+    const hub2 = new AgentRemoteHub({ dbPath: ":memory:" });
+    const started2 = await hub2.listen(started1.port, "127.0.0.1");
+    expect(started2.port).toBe(started1.port);
+    await hub2.close();
   });
 });

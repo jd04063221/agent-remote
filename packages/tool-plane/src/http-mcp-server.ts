@@ -46,7 +46,27 @@ export class LocalHttpMcpServer {
 
   async close(): Promise<void> {
     if (!this.server) return;
-    await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    const server = this.server;
+    this.server = undefined;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 1_500);
+      timer.unref?.();
+      try {
+        server.close(finish);
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+        server.unref?.();
+      } catch {
+        finish();
+      }
+    });
   }
 
   private async onRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

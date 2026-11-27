@@ -83,14 +83,42 @@ export class StdioMcpClient {
   }
 
   close(): void {
-    if (process.platform === "win32" && this.proc.pid) {
-      spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } else {
-      this.proc.kill("SIGTERM");
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`Local MCP server "${this.name}" closed`));
     }
+    this.pending.clear();
+    try {
+      this.proc.stdin.destroy();
+      this.proc.stdout.destroy();
+      this.proc.stderr.destroy();
+    } catch {
+      // ignore pipe destroy errors
+    }
+    if (process.platform === "win32" && this.proc.pid) {
+      try {
+        const killer = spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", () => {});
+        killer.unref();
+      } catch {
+        // ignore taskkill spawn error
+      }
+      try {
+        this.proc.kill();
+      } catch {
+        // already exited
+      }
+    } else {
+      try {
+        this.proc.kill("SIGTERM");
+      } catch {
+        // already exited
+      }
+    }
+    this.proc.unref();
   }
 
   private request(
@@ -104,6 +132,7 @@ export class StdioMcpClient {
         this.pending.delete(id);
         reject(new Error(`Local MCP "${this.name}" RPC "${method}" timed out`));
       }, timeoutMs);
+      timer.unref?.();
       this.pending.set(id, { resolve, reject, timer });
       this.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });

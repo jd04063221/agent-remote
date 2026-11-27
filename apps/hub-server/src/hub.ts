@@ -152,6 +152,7 @@ export class AgentRemoteHub {
 
   private httpServer?: http.Server;
   private wss?: WebSocketServer;
+  private closed = false;
 
   constructor(options: { dbPath: string; webDistDir?: string; configPath?: string }) {
     this.store = new HubStore(options.dbPath);
@@ -223,25 +224,54 @@ export class AgentRemoteHub {
   }
 
   async listen(port = 3775, host = "127.0.0.1"): Promise<{ url: string; port: number }> {
-    this.httpServer = http.createServer((req, res) => {
+    const server = http.createServer((req, res) => {
       void this.handleHttp(req, res);
     });
-    this.wss = new WebSocketServer({ server: this.httpServer, path: "/ws" });
-    this.wss.on("connection", (ws) => {
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          server.off("listening", onListening);
+          reject(err);
+        };
+        const onListening = () => {
+          server.off("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(port, host);
+      });
+    } catch (err) {
+      try {
+        server.close();
+      } catch {
+        // ignore cleanup error
+      }
+      throw err;
+    }
+
+    const wss = new WebSocketServer({ server, path: "/ws" });
+    wss.on("error", () => {
+      // Prevent late socket/server errors from crashing the Hub process
+    });
+    wss.on("connection", (ws) => {
       this.uiSockets.add(ws);
       ws.send(JSON.stringify({ type: "state_snapshot", payload: this.getFullState() }));
       ws.on("close", () => this.uiSockets.delete(ws));
     });
 
-    await new Promise<void>((resolve) => {
-      this.httpServer!.listen(port, host, () => resolve());
-    });
-    const addr = this.httpServer.address();
+    this.httpServer = server;
+    this.wss = wss;
+    const addr = server.address();
     const actualPort = typeof addr === "object" && addr ? addr.port : port;
     return { url: `http://${host}:${actualPort}`, port: actualPort };
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+
     for (const [tid, turn] of this.activeTurns.entries()) {
       turn.cancelled = true;
       if (turn.graceTimer) clearTimeout(turn.graceTimer);
@@ -258,24 +288,79 @@ export class AgentRemoteHub {
     }
     for (const rt of this.runtimes.values()) {
       rt.abortController.abort();
-      rt.channel.kill();
-      for (const c of rt.localMcpClients) c.close();
-      await rt.localHttpMcp?.close();
+      try {
+        rt.channel.kill();
+      } catch {
+        // ignore
+      }
+      for (const c of rt.localMcpClients) {
+        try {
+          c.close();
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        await rt.localHttpMcp?.close();
+      } catch {
+        // ignore
+      }
     }
     this.runtimes.clear();
+
+    for (const ws of this.uiSockets) {
+      try {
+        ws.terminate();
+      } catch {
+        // ignore
+      }
+    }
+    this.uiSockets.clear();
+    try {
+      this.wss?.close();
+    } catch {
+      // ignore
+    }
+    this.wss = undefined;
+
+    if (this.httpServer) {
+      const server = this.httpServer;
+      this.httpServer = undefined;
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, 1_500);
+        timer.unref?.();
+        try {
+          server.close(finish);
+          server.closeIdleConnections?.();
+          server.closeAllConnections?.();
+          server.unref?.();
+        } catch {
+          finish();
+        }
+      });
+    }
+
     for (const client of this.clients.values()) {
-      client.close();
+      try {
+        client.close();
+      } catch {
+        // ignore
+      }
     }
     this.clients.clear();
-    for (const ws of this.uiSockets) {
-      ws.close();
+
+    try {
+      this.store.close();
+    } catch {
+      // ignore
     }
-    this.wss?.close();
-    await new Promise<void>((resolve) => {
-      if (!this.httpServer) return resolve();
-      this.httpServer.close(() => resolve());
-    });
-    this.store.close();
   }
 
   getFullState() {

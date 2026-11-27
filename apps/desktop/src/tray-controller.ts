@@ -49,6 +49,7 @@ export interface AppLike {
   on(event: string, listener: (...args: unknown[]) => void): void;
   focus?(options?: { steal?: boolean }): void;
   quit(): void;
+  exit?(exitCode?: number): void;
 }
 
 export interface HubHandle {
@@ -74,6 +75,7 @@ export interface DesktopLifecycleDeps {
   notify?: (options: { title: string; body: string }) => void;
   logger?: { warn: (...args: unknown[]) => void };
   shutdownTimeoutMs?: number;
+  forceExitGraceMs?: number;
 }
 
 export interface DesktopLifecycleController {
@@ -441,6 +443,31 @@ export function createDesktopLifecycle(
       }
     });
 
+    let forceExitScheduled = false;
+    const scheduleForceExitWatchdog = (): void => {
+      if (forceExitScheduled || !cleanupDone) return;
+      forceExitScheduled = true;
+      const graceMs = deps.forceExitGraceMs ?? 300;
+      const watchdog = setTimeout(() => {
+        deps.app.exit?.(0);
+      }, graceMs);
+      // Unref'd so a clean process exits immediately with zero delay, while
+      // any lingering Windows/Node handle keeping libuv alive triggers exit(0).
+      watchdog.unref?.();
+    };
+
+    deps.app.on("will-quit", () => {
+      if (cleanupDone) {
+        scheduleForceExitWatchdog();
+      }
+    });
+
+    deps.app.on("quit", () => {
+      if (cleanupDone) {
+        scheduleForceExitWatchdog();
+      }
+    });
+
     deps.app.on("before-quit", (rawEvent) => {
       const event = rawEvent as CloseEventLike | undefined;
       quitting = true;
@@ -464,6 +491,7 @@ export function createDesktopLifecycle(
                   currentHub.close(),
                   new Promise<void>((resolve) => {
                     timer = setTimeout(resolve, timeoutMs);
+                    timer.unref?.();
                   }),
                 ]);
               } finally {
@@ -475,21 +503,27 @@ export function createDesktopLifecycle(
           } finally {
             cleanupDone = true;
             deps.app.quit();
+            scheduleForceExitWatchdog();
           }
         })();
       }
     });
 
-    void deps.app.whenReady().then(async () => {
-      await ensureMainWindow();
-      if (hub?.url) {
-        const strings = getStrings();
-        deps.notify?.({
-          title: strings.readyTitle,
-          body: strings.readyBody(hub.url),
-        });
-      }
-    });
+    void deps.app
+      .whenReady()
+      .then(async () => {
+        await ensureMainWindow();
+        if (hub?.url) {
+          const strings = getStrings();
+          deps.notify?.({
+            title: strings.readyTitle,
+            body: strings.readyBody(hub.url),
+          });
+        }
+      })
+      .catch((err) => {
+        deps.logger?.warn?.("[agent-remote] Failed to start desktop workbench:", err);
+      });
   };
 
   return {

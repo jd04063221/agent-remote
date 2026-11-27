@@ -104,6 +104,10 @@ export class HubStore {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
+    if (dbPath !== ":memory:") {
+      this.db.exec("PRAGMA journal_mode = WAL;");
+      this.db.exec("PRAGMA busy_timeout = 5000;");
+    }
     this.migrate();
     this.seedDefaults();
   }

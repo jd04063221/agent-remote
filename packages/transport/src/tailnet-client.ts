@@ -372,16 +372,27 @@ export class TailnetDirectClient extends EventEmitter {
     this.channelsBySession.clear();
     this.channelsById.clear();
     if (this.ws) {
+      const sock = this.ws;
+      this.ws = undefined;
       try {
-        if (this.ws.readyState === WebSocket.CONNECTING) {
-          this.ws.terminate();
+        if (sock.readyState === WebSocket.OPEN) {
+          sock.close();
+          // Ensure TLS/TCP socket cannot pin Node/Electron open during Windows exit
+          // while giving any queued session_kill frame a brief window to flush.
+          (sock as unknown as { _socket?: { unref?: () => void } })._socket?.unref?.();
+          setTimeout(() => {
+            try {
+              sock.terminate();
+            } catch {
+              // ignore
+            }
+          }, 150).unref?.();
         } else {
-          this.ws.close();
+          sock.terminate();
         }
       } catch {
         // ignore close errors
       }
-      this.ws = undefined;
     }
   }
 
@@ -521,6 +532,7 @@ export class TailnetDirectClient extends EventEmitter {
         this.pending.delete(id);
         reject(new Error(`Control request "${frame.type}" timed out after ${timeoutMs}ms`));
       }, timeoutMs);
+      timer.unref?.();
       this.pending.set(id, { resolve, reject, timer });
       this.sendRaw({ ...frame, id });
     });

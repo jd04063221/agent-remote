@@ -634,6 +634,7 @@ export class LocalToolEngine {
       const child = spawn(shell.bin, shell.args, {
         cwd,
         detached: process.platform !== "win32",
+        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -649,10 +650,12 @@ export class LocalToolEngine {
               process.kill(-child.pid, "SIGTERM");
             } else {
               // On Windows, terminate the entire spawned PowerShell/subcommand process tree cleanly
-              spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+              const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
                 stdio: "ignore",
                 windowsHide: true,
               });
+              killer.on("error", () => {});
+              killer.unref();
             }
           } catch {
             // already exited
@@ -673,11 +676,14 @@ export class LocalToolEngine {
       // Inactivity timer resets whenever the command emits stdout/stderr so active long-running
       // scripts (builds, tests, training jobs) do not get prematurely killed; hard wall-clock ceiling still applies.
       let idleTimer = setTimeout(() => killGroup(`Timed out after ${timeoutMs}ms of inactivity`), timeoutMs);
+      idleTimer.unref?.();
       const resetIdleTimer = () => {
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => killGroup(`Timed out after ${timeoutMs}ms of inactivity`), timeoutMs);
+        idleTimer.unref?.();
       };
       const wallTimer = setTimeout(() => killGroup(`Exceeded max execution limit of ${maxWallMs}ms`), maxWallMs);
+      wallTimer.unref?.();
 
       const append = (buf: Buffer) => {
         resetIdleTimer();

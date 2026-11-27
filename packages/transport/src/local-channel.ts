@@ -93,14 +93,37 @@ export class LocalProcessChannel extends EventEmitter implements RemoteSessionCh
   }
 
   kill(): void {
-    if (process.platform === "win32" && this.proc.pid) {
-      spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } else {
-      this.proc.kill("SIGTERM");
+    try {
+      this.proc.stdin.destroy();
+      this.proc.stdout.destroy();
+      this.proc.stderr.destroy();
+    } catch {
+      // ignore pipe destroy errors
     }
+    if (process.platform === "win32" && this.proc.pid) {
+      try {
+        const killer = spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", () => {});
+        killer.unref();
+      } catch {
+        // ignore taskkill spawn error
+      }
+      try {
+        this.proc.kill();
+      } catch {
+        // already exited
+      }
+    } else {
+      try {
+        this.proc.kill("SIGTERM");
+      } catch {
+        // already exited
+      }
+    }
+    this.proc.unref();
   }
 
   setMcpHandler(_handler: (req: McpRpcReqPayload) => Promise<McpRpcResPayload>): void {

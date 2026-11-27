@@ -26,6 +26,37 @@ function resolveAssetsDir(): string {
   return path.resolve(import.meta.dirname, "../assets");
 }
 
+async function listenWithRecovery(
+  hub: AgentRemoteHub,
+  preferredPort: number,
+  allowEphemeralFallback: boolean,
+): Promise<{ url: string; port: number }> {
+  try {
+    return await hub.listen(preferredPort, "127.0.0.1");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "EADDRINUSE") throw err;
+
+    // Brief retry in case the user reopened immediately while Windows was still
+    // releasing the previous socket on port 3775.
+    await new Promise((r) => setTimeout(r, 350));
+    try {
+      return await hub.listen(preferredPort, "127.0.0.1");
+    } catch (retryErr) {
+      const retryCode = (retryErr as NodeJS.ErrnoException)?.code;
+      if (!allowEphemeralFallback || retryCode !== "EADDRINUSE") {
+        throw retryErr;
+      }
+      // Fall back to an OS-assigned loopback port so another process (e.g. CLI `ar hub`)
+      // occupying 3775 never prevents the desktop GUI from opening.
+      console.warn(
+        `[agent-remote] Port ${preferredPort} is in use; falling back to an available local port.`,
+      );
+      return await hub.listen(0, "127.0.0.1");
+    }
+  }
+}
+
 if (!process.env.AGENT_REMOTE_VERSION && app.getVersion()) {
   process.env.AGENT_REMOTE_VERSION = app.getVersion();
 }
@@ -40,14 +71,20 @@ const lifecycle = createDesktopLifecycle({
       process.env.AGENT_REMOTE_DB ??
       path.join(os.homedir(), ".config", "agent-remote", "hub.sqlite");
     const webDistDir = resolveWebDistDir();
+    const explicitPort = Boolean(process.env.AGENT_REMOTE_PORT);
     const port = Number(process.env.AGENT_REMOTE_PORT ?? 3775);
 
     const hub = new AgentRemoteHub({ dbPath, webDistDir });
-    const started = await hub.listen(port, "127.0.0.1");
-    return {
-      url: started.url,
-      close: () => hub.close(),
-    };
+    try {
+      const started = await listenWithRecovery(hub, port, !explicitPort);
+      return {
+        url: started.url,
+        close: () => hub.close(),
+      };
+    } catch (err) {
+      await hub.close().catch(() => {});
+      throw err;
+    }
   },
   createBrowserWindow({ title, icon }) {
     return new BrowserWindow({
