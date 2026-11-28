@@ -1,0 +1,13 @@
+agent-remote
+Copyright 2026 agent-remote Contributors
+
+This product includes software developed for the agent-remote project
+(https://github.com/jd04063221/agent-remote).
+
+Third-Party Trademarks & Non-Affiliation Notice:
+Antigravity, Gemini, Claude, Codex, OpenCode, Kiro, Factory Droid, Tailscale,
+and all other referenced product names or trademarks are the property of their
+respective owners. agent-remote is an independent open-source orchestration tool
+and is not affiliated with, endorsed by, or sponsored by any third-party AI
+provider. Users are solely responsible for complying with the Terms of Service
+of any external CLI or AI service they choose to connect.

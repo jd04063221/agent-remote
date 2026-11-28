@@ -1,6 +1,7 @@
 {
   "name": "agent-remote",
   "version": "0.1.5-a",
+  "license": "Apache-2.0",
   "displayVersion": "0.1.5a",
   "type": "module",
   "exports": {

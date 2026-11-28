@@ -3,6 +3,7 @@
   "version": "0.1.5-a",
   "displayVersion": "0.1.5a",
   "description": "agent-remote multi-agent remote-brain / local-execution desktop workbench",
+  "license": "Apache-2.0",
   "author": "agent-remote <noreply@users.noreply.github.com>",
   "homepage": "https://github.com/jd04063221/agent-remote",
   "private": true,
