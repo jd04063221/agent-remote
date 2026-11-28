@@ -21,13 +21,14 @@ function runGit(args) {
 }
 
 function parseSemver(tag) {
-  const m = tag.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+  const m = tag.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)([a-zA-Z][0-9a-zA-Z]*)?(?:-(.+))?$/);
   if (!m) return null;
   return {
     major: Number(m[1]),
     minor: Number(m[2]),
     patch: Number(m[3]),
-    pre: m[4] ?? "",
+    letter: m[4] ?? "",
+    pre: m[5] ?? "",
   };
 }
 
@@ -40,6 +41,11 @@ function compareSemverDesc(a, b) {
   if (pa.major !== pb.major) return pb.major - pa.major;
   if (pa.minor !== pb.minor) return pb.minor - pa.minor;
   if (pa.patch !== pb.patch) return pb.patch - pa.patch;
+  if (pa.letter !== pb.letter) {
+    if (!pa.letter) return 1;
+    if (!pb.letter) return -1;
+    return pb.letter.localeCompare(pa.letter);
+  }
   if (pa.pre === pb.pre) return 0;
   if (!pa.pre) return -1;
   if (!pb.pre) return 1;
@@ -163,8 +169,9 @@ function main() {
     path.resolve(process.cwd(), "CHANGELOG.md"),
   );
 
-  const prevTag = findPreviousTag(tag);
-  const commits = collectCommits(prevTag, tag);
+  const standalone = process.argv.includes("--standalone");
+  const prevTag = standalone ? "" : findPreviousTag(tag);
+  const commits = standalone ? [] : collectCommits(prevTag, tag);
 
   let changelogBody = "";
   if (fs.existsSync(changelogPath)) {

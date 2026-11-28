@@ -40,12 +40,16 @@ function getCliVersion(): string {
   }
   try {
     const pkgPath = path.resolve(import.meta.dirname, "../package.json");
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version?: string };
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      displayVersion?: string;
+      version?: string;
+    };
+    if (pkg.displayVersion) return pkg.displayVersion;
     if (pkg.version) return pkg.version;
   } catch {
     // fallback below
   }
-  return "0.1.5";
+  return "0.1.5a";
 }
 
 function getFlag(name: string, fallback?: string): string | undefined {

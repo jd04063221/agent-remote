@@ -10,9 +10,13 @@ if (!process.env.AGENT_REMOTE_WEB_DIST && fs.existsSync(packagedWeb)) {
 if (!process.env.AGENT_REMOTE_VERSION) {
   try {
     const pkgPath = path.resolve(import.meta.dirname, "../package.json");
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version?: string };
-    if (pkg.version) {
-      process.env.AGENT_REMOTE_VERSION = pkg.version;
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      displayVersion?: string;
+      version?: string;
+    };
+    const ver = pkg.displayVersion || pkg.version;
+    if (ver) {
+      process.env.AGENT_REMOTE_VERSION = ver;
     }
   } catch {
     // ignore version read error

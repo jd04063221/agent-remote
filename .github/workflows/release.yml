@@ -62,8 +62,12 @@ jobs:
             const fs = require("node:fs");
             const p = "release-bundle/agent-remote/package.json";
             const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
-            const ver = (process.env.RELEASE_TAG || "").replace(/^v/, "");
-            if (/^\d+\.\d+\.\d+/.test(ver)) pkg.version = ver;
+            const rawVer = (process.env.RELEASE_TAG || "").replace(/^v/, "");
+            const semverVer = rawVer.replace(/^(\d+\.\d+\.\d+)([a-zA-Z][0-9a-zA-Z.-]*)$/, "$1-$2");
+            if (/^\d+\.\d+\.\d+/.test(semverVer)) {
+              pkg.version = semverVer;
+              pkg.displayVersion = rawVer;
+            }
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
           '
           mkdir -p release-bundle/agent-remote/web
@@ -131,8 +135,12 @@ jobs:
             const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
             pkg.name = "agent-remote-desktop";
             pkg.desktopName = "agent-remote.desktop";
-            const ver = (process.env.RELEASE_TAG || "").replace(/^v/, "");
-            if (/^\d+\.\d+\.\d+/.test(ver)) pkg.version = ver;
+            const rawVer = (process.env.RELEASE_TAG || "").replace(/^v/, "");
+            const semverVer = rawVer.replace(/^(\d+\.\d+\.\d+)([a-zA-Z][0-9a-zA-Z.-]*)$/, "$1-$2");
+            if (/^\d+\.\d+\.\d+/.test(semverVer)) {
+              pkg.version = semverVer;
+              pkg.displayVersion = rawVer;
+            }
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
           '
           cp -r apps/web/dist desktop-stage/web/dist
@@ -144,6 +152,8 @@ jobs:
           cp apps/desktop/electron-builder.yml desktop-stage/desktop/electron-builder.yml
       - name: Install Electron & electron-builder and package installer
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           cd desktop-stage/builder
           npm init -y
@@ -151,6 +161,22 @@ jobs:
           ELECTRON_VER=$(node -p "require('./node_modules/electron/package.json').version")
           cd ../desktop
           ../builder/node_modules/.bin/electron-builder --config electron-builder.yml ${{ matrix.eb_flag }} --publish never -c.electronVersion="$ELECTRON_VER"
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const rawVer = (process.env.RELEASE_TAG || "").replace(/^v/, "");
+            const semverVer = rawVer.replace(/^(\d+\.\d+\.\d+)([a-zA-Z][0-9a-zA-Z.-]*)$/, "$1-$2");
+            if (rawVer && semverVer && rawVer !== semverVer) {
+              const relDir = path.resolve("release");
+              for (const name of fs.readdirSync(relDir)) {
+                if (name.includes(semverVer)) {
+                  const next = name.replaceAll(semverVer, rawVer);
+                  fs.renameSync(path.join(relDir, name), path.join(relDir, next));
+                  console.log("Renamed artifact:", name, "->", next);
+                }
+              }
+            }
+          '
       - name: Smoke test bundled ar / agent-remote CLI
         shell: bash
         run: |
@@ -214,11 +240,24 @@ jobs:
           else
             echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+      - name: Retract superseded legacy releases for v0.1.5a security baseline
+        if: steps.tag.outputs.name == 'v0.1.5a'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for old_tag in v0.1.0 v0.1.1 v0.1.2 v0.1.3 v0.1.4 v0.1.5; do
+            gh release delete "$old_tag" --repo "${{ github.repository }}" --yes --cleanup-tag || true
+            git tag -d "$old_tag" 2>/dev/null || true
+          done
       - name: Generate release notes comparing against previous version
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.name }}
         run: |
-          node scripts/extract-release-notes.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}" --out release-notes.md
+          if [ "$RELEASE_TAG" = "v0.1.5a" ]; then
+            node scripts/extract-release-notes.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}" --standalone --out release-notes.md
+          else
+            node scripts/extract-release-notes.mjs --tag "$RELEASE_TAG" --repo "${{ github.repository }}" --out release-notes.md
+          fi
           cat release-notes.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -227,4 +266,6 @@ jobs:
           name: "agent-remote ${{ steps.tag.outputs.name }}"
           body_path: release-notes.md
           generate_release_notes: false
+          prerelease: false
+          make_latest: true
           files: dist-all/*

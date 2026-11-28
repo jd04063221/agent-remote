@@ -131,13 +131,17 @@ function resolveHubAppVersion(): string {
   for (const p of candidates) {
     try {
       if (!fs.existsSync(p)) continue;
-      const pkg = JSON.parse(fs.readFileSync(p, "utf8")) as { version?: string };
-      if (pkg.version?.trim()) return pkg.version.trim().replace(/^v/i, "");
+      const pkg = JSON.parse(fs.readFileSync(p, "utf8")) as {
+        displayVersion?: string;
+        version?: string;
+      };
+      const ver = pkg.displayVersion?.trim() || pkg.version?.trim();
+      if (ver) return ver.replace(/^v/i, "");
     } catch {
       // try next candidate
     }
   }
-  return "0.1.5";
+  return "0.1.5a";
 }
 
 export class AgentRemoteHub {

@@ -57,14 +57,33 @@ async function listenWithRecovery(
   }
 }
 
-if (!process.env.AGENT_REMOTE_VERSION && app.getVersion()) {
-  process.env.AGENT_REMOTE_VERSION = app.getVersion();
+function resolveDesktopDisplayVersion(): string {
+  if (process.env.AGENT_REMOTE_VERSION?.trim()) {
+    return process.env.AGENT_REMOTE_VERSION.trim().replace(/^v/i, "");
+  }
+  try {
+    const pkgPath = path.resolve(import.meta.dirname, "../package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      displayVersion?: string;
+      version?: string;
+    };
+    if (pkg.displayVersion?.trim()) return pkg.displayVersion.trim().replace(/^v/i, "");
+    if (pkg.version?.trim()) return pkg.version.trim().replace(/^v/i, "");
+  } catch {
+    // ignore read error
+  }
+  return app.getVersion() || "0.1.5a";
+}
+
+const resolvedVersion = resolveDesktopDisplayVersion();
+if (!process.env.AGENT_REMOTE_VERSION && resolvedVersion) {
+  process.env.AGENT_REMOTE_VERSION = resolvedVersion;
 }
 
 const lifecycle = createDesktopLifecycle({
   platform: process.platform,
   assetsDir: resolveAssetsDir(),
-  version: process.env.AGENT_REMOTE_VERSION || app.getVersion(),
+  version: resolvedVersion,
   app,
   async startHub() {
     const dbPath =

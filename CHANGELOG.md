@@ -4,6 +4,35 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.1.5a] - 2026-11-28
+
+> [!WARNING]
+> **历史版本撤回说明（为什么取消此前的 `v0.1.1` – `v0.1.5` 全部已发布版本）**
+>
+> 近期社区多起关于第三方客户端读取订阅额度触发账号风控/封号的报道显示：提取消费级订阅 CLI 的本地 OAuth 凭据并由第三方客户端直连未公开的内部额度接口，属于极高风险行为（Google Antigravity 与 Anthropic Claude 均对此类第三方 OAuth 探测采取严格风控）。
+>
+> 经逐行安全审计确认：
+> - 本项目此前对 **Antigravity (`agy`)** 从未读取 OAuth 凭据或直连未公开额度接口；
+> - 但此前已发布的 `v0.1.1` – `v0.1.5` 版本中，Go 远端节点（`apps/remote-node/internal/quota`）包含**读取 Claude Code 本地 `~/.claude/.credentials.json` / macOS Keychain 凭据并直连 Anthropic 未公开端点 `https://api.anthropic.com/api/oauth/usage`** 的逻辑。
+>
+> 为彻底消除所有历史安装包与远端二进制带来的潜在账号风控风险，避免用户误下载旧版，我们**已主动取消并下架此前发布的全部历史版本（`v0.1.1`、`v0.1.2`、`v0.1.3`、`v0.1.4`、`v0.1.5`）**，统一以本安全加固版本 **`v0.1.5a`** 作为全新基线发布。强烈建议此前安装过任意旧版本的用户立即升级本地客户端与远端 `agent-remote-node` 至 `v0.1.5a`。
+
+### 安全加固与清理（Security & Fixed）
+- **彻底移除消费级订阅 OAuth 凭据提取与未公开额度接口探测**：
+  - 删除 Go 远端节点中读取 `~/.claude/.credentials.json`、调用 macOS `security find-generic-password` 提取 Keychain 凭据以及请求 `https://api.anthropic.com/api/oauth/usage` 的全部代码；
+  - 对 `antigravity` 与 `claude` 在 Hub 与 Web/桌面端彻底禁用远端 OAuth 额度探测（隐藏“刷新”按钮并本地直接拦截），确保零凭据读取、零非官方接口请求、零后台轮询，仅被动统计官方 CLI 正常对话事件返回的 Token 消耗与费用；
+  - 仅保留对 **Codex 官方 `codex app-server` 原生 `account/rateLimits/read` RPC** 以及用户自带按量付费 API Key（`DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY`）官方余额接口的支持。
+- **加固 Antigravity (`agy`) 无痕隔离与本机模型刷新**：
+  - 无痕隔离模式下对 `antigravity-oauth-token` 与 `installation_id` 强制要求真实软链接（严禁复制为临时副本），防止 `agy` 刷新令牌时出现临时副本与主凭据分叉；
+  - 本机直连模式下刷新 `agy` 模型清单优先调用官方 `agy models` 子命令，避免额外创建不必要的远端 ACP 会话。
+
+### 完整核心能力（包含此前 `v0.1.5` 全部更新）
+- **跨平台桌面端系统托盘 / 状态栏驻留与自定义图标**：Windows / macOS / Linux 点击关闭（`×` / `Alt+F4` / `Cmd+W`）默认隐藏至系统托盘/顶部状态栏，右键托盘菜单选择「退出 agent-remote」才完全退出；内置单实例防重开锁与多分辨率三端自定义应用/托盘图标。
+- **彻底修复 Windows 退出残留进程与重开报错**：强制关闭 HTTP Keep-Alive 与 UI WebSocket 连接、清理 Windows 子进程树与管道、开启 SQLite `WAL` + `busy_timeout`，并加入退出看门狗与端口 `3775` 冲突自动恢复机制。
+- **局域网 / OpenVPN / WireGuard 节点原生安全认证**：Go 远端节点新增 `--auth-mode pubkey`（Ed25519 公私钥防重放签名、`authorized_keys` 免重启热加载）与 `--auth-mode token --token`；GUI 支持一键生成 Ed25519 密钥对、导入现有 OpenSSH 私钥及一键生成 256 位 `ar_sk_` API 密钥，裸局域网/VPN `IP:端口` 自动补全为 `ws://.../v1/ws`。
+- **真无痕零留痕隔离与非无痕无缝续接**：`agy` / `opencode` / 联邦子代理真无痕模式零远端对话留痕；非无痕优先 `session/resume` 跨重启续接同一会话并自动重绑 MCP 通道；强化多轮本地历史回放与 Quota-Saver 子代理委派引导。
+- **6 档完整权限体系、完整 GFM Markdown 渲染与长任务零 600s 超时**：支持 `plan` → `default` → `accept-edits` → `auto` → `workspace-full` → `full-access`，内置 Windows 便携 `.zip` 与三端内置 `ar` / `agent-remote` CLI。
+
 ## [0.1.5] - 2026-11-27
 
 ### 新增（Added）
