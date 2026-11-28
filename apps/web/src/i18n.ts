@@ -121,7 +121,9 @@ const en = {
   "inspector.remoteQuota": "REMOTE AGENT REMAINING QUOTA",
   "inspector.check": "Check ↻",
   "inspector.quotaHint":
-    'Click "Check ↻" to query remote quota / balance (credentials stay on remote host).',
+    'Click "Check ↻" to query official Codex RPC rate limits or BYOK API-key balances (DeepSeek / OpenRouter).',
+  "inspector.quotaDisabledOauth":
+    "Direct OAuth quota probing is disabled for Antigravity / Claude to protect your account (no credential reading or undocumented quota API calls). Only official in-session CLI token usage is tracked below.",
   "inspector.resets": "Resets {time}",
   "inspector.pctLeft": "{pct}% left",
   "inspector.tokenUsageHead": "TOKEN USAGE & QUOTA-SAVER",
@@ -341,7 +343,10 @@ const zhCN: Record<MessageKey, string> = {
   "inspector.noTerminal": "（暂无本地命令输出）",
   "inspector.remoteQuota": "远端 AGENT 剩余额度",
   "inspector.check": "刷新 ↻",
-  "inspector.quotaHint": "点击「刷新 ↻」实时查询远端剩余额度/余额（凭据始终留在远端，不传回本地）。",
+  "inspector.quotaHint":
+    "点击「刷新 ↻」查询 Codex 官方 RPC 限额或 BYOK API 密钥余额（DeepSeek / OpenRouter）。",
+  "inspector.quotaDisabledOauth":
+    "出于账号安全考虑，已禁用 Antigravity / Claude 的 OAuth 订阅额度探测（不读取登录凭据、不调用非官方额度接口），下方仅统计官方 CLI 对话返回的 Token 消耗。",
   "inspector.resets": "重置时间 {time}",
   "inspector.pctLeft": "剩余 {pct}%",
   "inspector.tokenUsageHead": "TOKEN 消耗与省额度统计",
@@ -558,7 +563,10 @@ const zhTW: Record<MessageKey, string> = {
   "inspector.noTerminal": "（尚無本機指令輸出）",
   "inspector.remoteQuota": "遠端 AGENT 剩餘額度",
   "inspector.check": "檢查 ↻",
-  "inspector.quotaHint": "點擊「檢查 ↻」即時查詢遠端剩餘額度/餘額（憑證永不離開遠端主機）。",
+  "inspector.quotaHint":
+    "點擊「檢查 ↻」查詢 Codex 官方 RPC 限額或 BYOK API 金鑰餘額（DeepSeek / OpenRouter）。",
+  "inspector.quotaDisabledOauth":
+    "基於帳號安全考量，已停用 Antigravity / Claude 的 OAuth 訂閱額度探測（不讀取登入憑證、不呼叫非官方額度介面），下方僅統計官方 CLI 對話回傳的 Token 消耗。",
   "inspector.resets": "重置時間 {time}",
   "inspector.pctLeft": "剩餘 {pct}%",
   "inspector.tokenUsageHead": "TOKEN 用量與省額度統計",
@@ -777,7 +785,9 @@ const ja: Record<MessageKey, string> = {
   "inspector.remoteQuota": "リモート AGENT クォータ残量",
   "inspector.check": "確認 ↻",
   "inspector.quotaHint":
-    "「確認 ↻」でリモート残量を取得します（認証情報はリモートホストから外部へ出ません）。",
+    "「確認 ↻」で Codex 公式 RPC レート制限や BYOK API キー残高（DeepSeek / OpenRouter）を取得します。",
+  "inspector.quotaDisabledOauth":
+    "アカウント保護のため Antigravity / Claude の OAuth 残量プローブは無効化されています（認証情報の読み取りや非公式 API 呼び出しを行いません）。下部のセッション内トークン統計のみ記録されます。",
   "inspector.resets": "リセット {time}",
   "inspector.pctLeft": "残り {pct}%",
   "inspector.tokenUsageHead": "トークン使用量とクォータ節約",

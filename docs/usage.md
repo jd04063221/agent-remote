@@ -479,7 +479,8 @@ git push origin v0.1.0
 2. **`ar models` 返回空列表**
    - 先运行 `ar doctor` 确认远端对应的 Agent CLI 已安装并在远端 `PATH` 中；若安装了自定义路径，可在 Profile 里配置 `remote_bin = "/abs/path/to/bin"`。
 3. **`ar quota` 提示 `unavailable`**
-   - Claude 需远端存在已登录的 `~/.claude/.credentials.json`（OAuth 订阅）；OpenCode / Factory Droid 需远端环境变量设置 `DEEPSEEK_API_KEY` 或 `OPENROUTER_API_KEY`；Antigravity (`agy 1.5.x`) 上游暂未提供非交互式剩余额度接口，仅展示订阅等级与本地 Token 统计。
+   - 出于账号安全考虑，本项目**已彻底禁用**对消费级订阅 OAuth 凭证的读取与非官方额度接口探测（包括 Antigravity `antigravity-oauth-token` / CloudCode 内部接口、Claude `~/.claude/.credentials.json` / macOS Keychain 与 `/api/oauth/usage`），仅被动统计官方 CLI 正常对话输出中的 Token 消耗与费用；
+   - 目前仅对 **OpenCode / Factory Droid 的官方计费 API Key 余额**（需远端环境变量设置 `DEEPSEEK_API_KEY` 或 `OPENROUTER_API_KEY`）与 **Codex 官方 `codex app-server` 原生 `account/rateLimits/read` RPC** 提供实时查询。
 4. **本地提示 Node 版本或 `node:sqlite` 错误**
    - 本项目使用 Node.js 内置 `node:sqlite`，请确保本地运行环境为 **Node.js `>= 26.0.0`**（`node -v` 检查）。
 5. **在 `ar ui` 新建线程时看不到 Git Worktree 分支**

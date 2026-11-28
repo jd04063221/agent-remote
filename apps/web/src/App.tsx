@@ -1817,11 +1817,14 @@ export function App() {
           </div>
         )}
 
-        {inspectorTab === "quota" && (
+        {inspectorTab === "quota" && (() => {
+          const oauthQuotaDisabled =
+            activeProfile?.agent === "antigravity" || activeProfile?.agent === "claude";
+          return (
           <div className="inspector-body">
             <div className="section-head">
               <span>{t("inspector.remoteQuota")}</span>
-              {activeProfile && (
+              {activeProfile && !oauthQuotaDisabled && (
                 <button
                   className="btn ghost xs"
                   onClick={async () => {
@@ -1838,6 +1841,9 @@ export function App() {
               )}
             </div>
             {(() => {
+              if (oauthQuotaDisabled) {
+                return <div className="muted-sm">{t("inspector.quotaDisabledOauth")}</div>;
+              }
               const q = activeProfile
                 ? (state.quotas ?? []).find(
                     (x) => x.hostId === activeProfile.hostId && x.profileId === activeProfile.id,
@@ -1914,7 +1920,8 @@ export function App() {
             </div>
             <div className="muted-sm">{t("inspector.quotaSaverTip")}</div>
           </div>
-        )}
+          );
+        })()}
       </aside>
 
       {/* MODALS */}

@@ -808,10 +808,19 @@ func applyEphemeralIsolation(agent, resolvedCmd, workdir string, args []string) 
 		if err := os.MkdirAll(ephemAppDir, 0o700); err != nil {
 			return args, envOverrides
 		}
+		// Never duplicate OAuth tokens or installation_id into throwaway copies:
+		// require real symlinks so official `agy` refreshes its own canonical token file in-place.
+		for _, mustSymlink := range []string{"antigravity-oauth-token", "installation_id"} {
+			src := filepath.Join(srcAppDir, mustSymlink)
+			if _, statErr := os.Stat(src); statErr == nil {
+				if err := os.Symlink(src, filepath.Join(ephemAppDir, mustSymlink)); err != nil {
+					_ = os.RemoveAll(ephemGemini)
+					return args, envOverrides
+				}
+			}
+		}
 		for _, entry := range []string{
-			"antigravity-oauth-token",
 			"settings.json",
-			"installation_id",
 			"jetski_state.pbtxt",
 			"builtin",
 			"bin",

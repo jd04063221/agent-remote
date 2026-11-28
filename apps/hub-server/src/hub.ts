@@ -1,8 +1,12 @@
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { promisify } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
+
+const execFileAsync = promisify(execFile);
 
 import {
   buildQuotaSaverGuidance,
@@ -536,6 +540,33 @@ export class AgentRemoteHub {
       return snapshot;
     }
 
+    // Local host mode: prefer official CLI `models` subcommand for Antigravity to avoid
+    // opening an extra remote ACP session just to list available models.
+    if (profile.agent === "antigravity") {
+      try {
+        const bin = profile.remoteBin ?? "agy";
+        const { stdout } = await execFileAsync(bin, ["models"], {
+          timeout: 20_000,
+          windowsHide: true,
+        });
+        const cliModels = parseAgyModelsOutput(stdout);
+        if (cliModels.length > 0) {
+          const snapshot: CatalogSnapshot = {
+            hostId: host.id,
+            profileId: profile.id,
+            agent: "antigravity",
+            models: cliModels,
+            fetchedAt: new Date().toISOString(),
+          };
+          this.store.upsertCatalog(snapshot);
+          this.broadcast({ type: "catalog_updated", payload: snapshot });
+          return snapshot;
+        }
+      } catch {
+        // Fall through to ACP session discovery if `agy models` fails
+      }
+    }
+
     // Local host mode: spawn agy/opencode directly to inspect live ACP session/new catalog
     const sandbox = new WorkspaceSandbox({ workspaceRoot: process.cwd(), readOnly: true });
     const engine = new LocalToolEngine({ sandbox, policy: new PolicyEngine({ mode: "plan" }) });
@@ -572,6 +603,31 @@ export class AgentRemoteHub {
     if (!profile) throw new Error(`Unknown profile: ${profileId}`);
     const host = this.store.getHost(profile.hostId);
     if (!host) throw new Error(`Unknown host: ${profile.hostId}`);
+
+    // Account-safety invariant: NEVER extract consumer OAuth tokens or call undocumented
+    // quota APIs for Antigravity or Claude. Return a safe local snapshot immediately.
+    if (profile.agent === "antigravity" || profile.agent === "claude") {
+      const catalog = this.store
+        .listCatalogs()
+        .find((c) => c.hostId === host.id && c.profileId === profile.id);
+      const snap: QuotaSnapshot = {
+        hostId: host.id,
+        profileId: profile.id,
+        agent: profile.agent,
+        available: false,
+        source: "unavailable",
+        planTier: catalog?.tierName,
+        windows: [],
+        note:
+          profile.agent === "antigravity"
+            ? "Direct Antigravity quota probing is disabled to protect your Google account (no OAuth token reading or undocumented CloudCode API calls). Hub tracks in-session token usage from official `agy acp` events."
+            : "Direct Claude OAuth quota probing is disabled to protect your subscription account (no credential/Keychain extraction or undocumented `/api/oauth/usage` calls). Hub tracks in-session token usage and reported cost from official Claude CLI output.",
+        fetchedAt: new Date().toISOString(),
+      };
+      this.store.upsertQuota(snap);
+      this.broadcast({ type: "quota_updated", payload: snap });
+      return snap;
+    }
 
     // Live Codex quota via active app-server session or lightweight ephemeral RPC probe
     if (profile.agent === "codex") {

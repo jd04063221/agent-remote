@@ -210,10 +210,16 @@ function applyLocalEphemeralIsolation(
     const ephemAppDir = path.join(ephemGemini, "antigravity-cli");
     try {
       fs.mkdirSync(ephemAppDir, { recursive: true });
+      // Never copy OAuth tokens or installation_id into throwaway temp dirs;
+      // require real symlinks so official `agy` updates its canonical token file in-place.
+      for (const mustLink of ["antigravity-oauth-token", "installation_id"]) {
+        const src = path.join(srcAppDir, mustLink);
+        if (fs.existsSync(src)) {
+          fs.symlinkSync(src, path.join(ephemAppDir, mustLink), "file");
+        }
+      }
       for (const entry of [
-        "antigravity-oauth-token",
         "settings.json",
-        "installation_id",
         "jetski_state.pbtxt",
         "builtin",
         "bin",
@@ -223,7 +229,11 @@ function applyLocalEphemeralIsolation(
       }
       args.push("--gemini-dir", ephemGemini);
     } catch {
-      // ignore isolation failure and fall back cleanly
+      try {
+        fs.rmSync(ephemGemini, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup error
+      }
     }
   }
 }
